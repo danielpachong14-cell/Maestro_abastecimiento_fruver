@@ -1,0 +1,29 @@
+# Archivos de salida generados por el script
+Output/
+
+# Archivos temporales de Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Archivos temporales de Excel
+~$*.xlsx
+~$*.xls
+
+# Entornos virtuales
+venv/
+.venv/
+env/
+
+# IDE / editors
+.vscode/
+*.swp
+*.swo
+
+# Claude Code internals
+.claude/
