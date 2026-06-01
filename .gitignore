@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+._*
+
+# Temporales de Office
+~$*
+
+# Python
+distribuidor-fruver/venv/
+distribuidor-fruver/__pycache__/
+distribuidor-fruver/**/__pycache__/
+*.pyc
+distribuidor-fruver/.pytest_cache/
