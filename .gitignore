@@ -6,19 +6,26 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.pyc
 .Python
 *.egg-info/
 dist/
 build/
 
-# Archivos temporales de Excel
+# Archivos temporales de Excel / Office
 ~$*.xlsx
 ~$*.xls
+~$*
 
 # Entornos virtuales
 venv/
 .venv/
 env/
+distribuidor-fruver/venv/
+
+# macOS
+.DS_Store
+._*
 
 # IDE / editors
 .vscode/
