@@ -117,7 +117,7 @@ def _autofit(ws):
         ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 35)
 
 
-def _write_resumen_ejecutivo(ws, df_t, df_excluidos=None, df_resumen_zona=None, df_resumen_cuadrante=None):
+def _write_resumen_ejecutivo(ws, df_t, df_excluidos=None, df_resumen_zona=None, df_resumen_cuadrante=None, df_resumen_tienda=None):
     """
     Escribe la hoja de Resumen Ejecutivo usando celdas openpyxl directamente
     (no un DataFrame). Calcula métricas agregadas y las presenta con colores
@@ -289,6 +289,43 @@ def _write_resumen_ejecutivo(ws, df_t, df_excluidos=None, df_resumen_zona=None, 
             _row(r, f"  {to['Bodega Origen']}  {to['Tienda Origen']}", int(to["Cajas a Trasladar"]), "", "")
 
     r += 1; _blank(r)
+
+    # ── Todas las tiendas origen con cajas a enviar ──────────────────────────
+    if df_resumen_tienda is not None and not df_resumen_tienda.empty:
+        df_envia = df_resumen_tienda[df_resumen_tienda["Cajas Enviadas"] > 0].sort_values(
+            "Cajas Enviadas", ascending=False
+        )
+        if not df_envia.empty:
+            ws.column_dimensions["E"].width = 22
+
+            r += 1; _merge_title(r, f"TODAS LAS TIENDAS ORIGEN — CAJAS A ENVIAR ({len(df_envia)} tiendas)", C_SECCION, F_SEC, cols="A:E")
+            r += 1
+            for ci, h in enumerate(["Bodega", "Tienda", "Zona", "Traslados Enviados", "Cajas a Enviar"]):
+                col_letra = ["A", "B", "C", "D", "E"][ci]
+                c = ws[f"{col_letra}{r}"]
+                c.value = h
+                c.fill = C_SECCION
+                c.font = Font(color="FFFFFF", bold=True, size=10)
+                c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                c.border = borde
+            ws.row_dimensions[r].height = 18
+
+            for _, fila in df_envia.iterrows():
+                r += 1
+                for ci, (key, alin) in enumerate([
+                    ("Bodega", "center"), ("Tienda", "left"), ("Zona", "center"),
+                    ("Traslados Enviados", "center"), ("Cajas Enviadas", "center"),
+                ]):
+                    col_letra = ["A", "B", "C", "D", "E"][ci]
+                    c = ws[f"{col_letra}{r}"]
+                    c.value = fila[key]
+                    c.fill = C_LABEL if ci == 0 else C_VALOR
+                    c.font = F_LABEL if ci == 0 else F_VAL
+                    c.alignment = Alignment(horizontal=alin, vertical="center")
+                    c.border = borde
+                ws.row_dimensions[r].height = 18
+
+            r += 1; _blank(r)
 
     r += 1; _merge_title(r, "VERIFICACIÓN — TRASLADOS ELIMINADOS", C_SECCION, F_SEC)
     r += 1; _row(r, "Traslados eliminados en verificación", excl_total, "", "",
@@ -790,6 +827,38 @@ if not df_traslados.empty:
 else:
     resumen_cuadrante = pd.DataFrame()
 
+if not df_traslados.empty:
+    _res_envia = (
+        df_traslados.groupby(["Bodega Origen", "Tienda Origen", "Zona Origen"])
+        .agg(Traslados_Enviados=("Cajas a Trasladar", "count"),
+             Cajas_Enviadas=("Cajas a Trasladar", "sum"))
+        .reset_index()
+        .rename(columns={
+            "Bodega Origen": "Bodega", "Tienda Origen": "Tienda", "Zona Origen": "Zona",
+            "Traslados_Enviados": "Traslados Enviados", "Cajas_Enviadas": "Cajas Enviadas",
+        })
+    )
+    _res_recibe = (
+        df_traslados.groupby(["Bodega Destino", "Tienda Destino", "Zona Destino"])
+        .agg(Traslados_Recibidos=("Cajas a Trasladar", "count"),
+             Cajas_Recibidas=("Cajas a Trasladar", "sum"))
+        .reset_index()
+        .rename(columns={
+            "Bodega Destino": "Bodega", "Tienda Destino": "Tienda", "Zona Destino": "Zona",
+            "Traslados_Recibidos": "Traslados Recibidos", "Cajas_Recibidas": "Cajas Recibidas",
+        })
+    )
+    resumen_tienda = (
+        _res_envia.merge(_res_recibe, on=["Bodega", "Tienda", "Zona"], how="outer")
+        .fillna(0)
+        .sort_values(["Zona", "Tienda"])
+        .reset_index(drop=True)
+    )
+    for col in ["Traslados Enviados", "Cajas Enviadas", "Traslados Recibidos", "Cajas Recibidas"]:
+        resumen_tienda[col] = resumen_tienda[col].astype(int)
+else:
+    resumen_tienda = pd.DataFrame()
+
 
 # ---------------------------------------------------------------------------
 # SECCIÓN 6 — Exportar resultados a Excel
@@ -825,13 +894,25 @@ with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
         writer.sheets["Resumen Ejecutivo"], df_traslados,
         df_excluidos_verificacion,
         resumen if not resumen.empty else None,
-        resumen_cuadrante if not resumen_cuadrante.empty else None
+        resumen_cuadrante if not resumen_cuadrante.empty else None,
+        resumen_tienda if not resumen_tienda.empty else None,
     )
 
     # Hoja 2: Traslados dentro de la misma zona
     df_misma.to_excel(writer, sheet_name="Traslados Misma Zona", index=False)
     _apply_header_style(writer.sheets["Traslados Misma Zona"])
     _autofit(writer.sheets["Traslados Misma Zona"])
+
+    # Hoja 3: Resumen por Tienda
+    if not resumen_tienda.empty:
+        cols_tienda = [
+            "Bodega", "Tienda", "Zona",
+            "Traslados Enviados", "Cajas Enviadas",
+            "Traslados Recibidos", "Cajas Recibidas",
+        ]
+        resumen_tienda[cols_tienda].to_excel(writer, sheet_name="Resumen por Tienda", index=False)
+        _apply_header_style(writer.sheets["Resumen por Tienda"])
+        _autofit(writer.sheets["Resumen por Tienda"])
 
 
 print(f"\n{'='*60}")
