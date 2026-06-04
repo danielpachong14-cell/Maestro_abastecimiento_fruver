@@ -12,7 +12,3 @@ distribuidor-fruver/**/__pycache__/
 *.pyc
 distribuidor-fruver/.pytest_cache/
 .pytest_cache/
-
-# Archivos de datos (no versionar)
-Input/
-Output/
