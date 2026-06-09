@@ -4,9 +4,11 @@ import pandas as pd
 import pytest
 
 from core.algorithm import (
+    MAX_CAJAS_POR_ITEM,
     MIN_STOCK_AGOTADO,
     MIN_STOCK_SAFETY,
     TARGET_DAYS,
+    TOPE_EXCEDENTE,
     distribuir_item,
 )
 
@@ -138,6 +140,165 @@ def test_surplus_prioriza_menos_stock():
     a_asig = tiendas.loc[tiendas['store_code'] == 'A', 'cajas_asignadas'].iloc[0]
     assert b_asig >= 1, "B debía recibir la caja (menos días proyectados)"
     assert a_asig == 0, "A no debía recibir (ya cubierta con más días)"
+
+
+def test_surplus_no_amplifica_brecha_de_dias():
+    """El sobrante no debe ampliar la brecha de días entre tiendas lentas y
+    rápidas — el problema reportado por el usuario (ítem 157: tiendas de bajo
+    consumo terminaban con MUCHOS más días que las de alto consumo).
+
+    Repartir la MISMA CANTIDAD DE CAJAS reparte cantidades MUY DISTINTAS de
+    DÍAS (Δdías ≈ cajas/consumo): la tienda lenta (consumo bajo) ganaría ~9
+    días por caja mientras la rápida ganaría ~0.6 — ampliando la brecha en
+    vez de cerrarla. El reparto correcto pondera por
+    `consumo_diario / días_actuales`, así que LENTA (ya muy adelantada, con
+    poco peso) no debe recibir más cajas que RAPIDA (más consumo y más
+    atrasada), y la brecha de días entre ambas no debe crecer.
+
+      LENTA:  consumo=0.2, stock=3 → 15.0 días (muy cubierta)
+      MEDIA:  consumo=1.0, stock=4 →  4.0 días
+      RAPIDA: consumo=1.8, stock=6 →  3.3 días (la más atrasada)
+    """
+    lenta = _store('LENTA', consumo=0.2, dias=15.0, existencias=3.0)
+    media = _store('MEDIA', consumo=1.0, dias=4.0, existencias=4.0)
+    rapida = _store('RAPIDA', consumo=1.8, dias=3.33, existencias=6.0)
+    tiendas, remaining = distribuir_item('X', 6, _df([lenta, media, rapida], cajas=6))
+    assert remaining == 0
+
+    lenta_row = tiendas.loc[tiendas['store_code'] == 'LENTA'].iloc[0]
+    rapida_row = tiendas.loc[tiendas['store_code'] == 'RAPIDA'].iloc[0]
+
+    assert rapida_row['cajas_asignadas'] >= lenta_row['cajas_asignadas'], (
+        "RAPIDA (más consumo, más atrasada en días) no debía recibir menos "
+        "cajas que LENTA (menos consumo, ya muy adelantada)"
+    )
+
+    dias_final_lenta = ((lenta_row['inventario_efectivo'] + lenta_row['cajas_asignadas'])
+                        / lenta_row['consumo_diario'])
+    dias_final_rapida = ((rapida_row['inventario_efectivo'] + rapida_row['cajas_asignadas'])
+                         / rapida_row['consumo_diario'])
+    brecha_inicial = lenta_row['dias_proyectados'] - rapida_row['dias_proyectados']
+    brecha_final = dias_final_lenta - dias_final_rapida
+    assert brecha_final <= brecha_inicial, (
+        "La brecha de días entre LENTA y RAPIDA no debía ampliarse "
+        f"(inicial={brecha_inicial:.2f}, final={brecha_final:.2f})"
+    )
+
+
+def test_excedente_respeta_tope_para_todas_las_tiendas():
+    """El reparto del sobrante (Fase 2b) no debe dejar a NINGUNA tienda —
+    de alto, medio o bajo consumo — por encima de TOPE_EXCEDENTE días, ni
+    recibiendo más de MAX_CAJAS_POR_ITEM cajas, cuando el sobrante alcanza
+    para que el "Paso A" (proporcional, con tope) resuelva todo sin caer
+    al "Paso B" de cero-residuo. Es la validación directa de la preocupación
+    del usuario: que las tiendas de consumo medio no terminen sobre-stockeadas.
+
+    Las 3 tiendas arrancan EXACTAMENTE en TARGET_DAYS (cubiertas, no piden
+    nada en Fase 1/2a). El sobrante (7 cajas) coincide con la suma exacta
+    del "espacio" que cada una tiene bajo sus topes:
+      ALTA  (consumo=3.0, 9.0 cj =  3.0d): tope de cajas (MAX=3) manda   → cabe hasta +3
+      MEDIA (consumo=1.0, 3.0 cj =  3.0d): tope de cajas (MAX=3) manda   → cabe hasta +3
+      BAJA  (consumo=0.5, 1.5 cj =  3.0d): tope de días (6.0d) manda     → cabe hasta +1
+    """
+    alta = _store('ALTA', consumo=3.0, dias=TARGET_DAYS, existencias=9.0)
+    media = _store('MEDIA', consumo=1.0, dias=TARGET_DAYS, existencias=3.0)
+    baja = _store('BAJA', consumo=0.5, dias=TARGET_DAYS, existencias=1.5)
+    tiendas, remaining = distribuir_item('X', 7, _df([alta, media, baja], cajas=7))
+    assert remaining == 0
+    assert int(tiendas['cajas_asignadas'].sum()) == 7
+
+    for _, row in tiendas.iterrows():
+        dias_final = ((row['inventario_efectivo'] + row['cajas_asignadas'])
+                      / row['consumo_diario'])
+        assert dias_final <= TOPE_EXCEDENTE + 1e-9, (
+            f"{row['store_code']} terminó con {dias_final:.2f} días — "
+            f"supera TOPE_EXCEDENTE ({TOPE_EXCEDENTE})"
+        )
+        assert row['cajas_asignadas'] <= MAX_CAJAS_POR_ITEM, (
+            f"{row['store_code']} recibió {row['cajas_asignadas']} cajas — "
+            f"supera MAX_CAJAS_POR_ITEM ({MAX_CAJAS_POR_ITEM}) sin que se "
+            "activara el Paso B de cero-residuo"
+        )
+
+
+def test_paso_b_activa_y_reparte_por_menor_dias_actuales():
+    """Caso extremo (raro en la práctica, según CLAUDE.md): el CEDI manda
+    MUCHO más de lo que las tiendas elegibles pueden absorber bajo sus topes.
+    Todas quedan inelegibles para el Paso A antes de agotar el sobrante, así
+    que el "Paso B" debe activarse para garantizar cero residuo — repartiendo
+    lo que falta por menor `días_actuales` e ignorando MAX_CAJAS_POR_ITEM
+    (algorithm.py:247-260; la garantía de cero residuo manda sobre el tope).
+
+      P: consumo=2.0, existencias=0   → AGOTADA; en Fase 1 llega a su tope
+         de 3 cajas y queda en 1.5 días (muy atrasada, va a la cabeza del
+         round-robin de Paso B)
+      Q: consumo=1.0, existencias=6.0 → CUBIERTA; arranca ya en 6.0 días
+         (= TOPE_EXCEDENTE), inelegible para el sobrante desde la ronda 1
+
+    Ninguna sigue elegible para el Paso A (P por tope de cajas, Q por tope
+    de días) → Paso B reparte las 5 cajas restantes alternando, empezando
+    por P (menos días_actuales) — por eso P termina con más que Q (3 vs 2).
+    Este es justamente el mecanismo que puede generar sobre-stock visible:
+    no es un defecto del algoritmo, es la garantía de cero residuo chocando
+    con un sobrante que excede lo que el portafolio de tiendas puede tomar
+    — exactamente lo que "Análisis Comprador" existe para señalar.
+    """
+    p = _store('P', consumo=2.0, dias=0.0, existencias=0.0)
+    q = _store('Q', consumo=1.0, dias=6.0, existencias=6.0)
+    tiendas, remaining = distribuir_item('X', 8, _df([p, q], cajas=8))
+    assert remaining == 0
+    assert int(tiendas['cajas_asignadas'].sum()) == 8
+
+    p_row = tiendas.loc[tiendas['store_code'] == 'P'].iloc[0]
+    q_row = tiendas.loc[tiendas['store_code'] == 'Q'].iloc[0]
+
+    # Paso B se activó: P superó MAX_CAJAS_POR_ITEM, algo imposible en Paso A
+    # (su `room` siempre está acotado por `MAX_CAJAS_POR_ITEM - cajas_asignadas`).
+    assert p_row['cajas_asignadas'] > MAX_CAJAS_POR_ITEM, (
+        "Se esperaba que el Paso B ignorara MAX_CAJAS_POR_ITEM para P"
+    )
+    assert q_row['cajas_fase2b'] > 0, "Q también debía recibir parte del residuo"
+
+    # P iba más atrasada (1.5 días tras Fase 1, frente a los 6.0 de Q) →
+    # el round-robin de Paso B la prioriza, dándole el primer (y por tanto
+    # más) reparto de las 5 cajas restantes (3 vs 2).
+    assert p_row['cajas_fase2b'] > q_row['cajas_fase2b'], (
+        "El Paso B debía priorizar a P (menor días_actuales) sobre Q "
+        f"(P recibió {p_row['cajas_fase2b']}, Q recibió {q_row['cajas_fase2b']})"
+    )
+
+
+def test_frontera_tope_excedente():
+    """La elegibilidad para el sobrante mira el estado TRAS recibir una caja
+    más (`dias_tras_una <= TOPE_EXCEDENTE`, algorithm.py:225-234) — no el
+    estado actual. Una tienda que terminaría EXACTAMENTE en el tope sigue
+    siendo elegible; una que lo cruzaría por una décima de día, no.
+
+      F6:  consumo=0.5, existencias=2.0 → tras +1 caja: (2.0+1)/0.5 = 6.0 (== tope)
+      F61: consumo=0.5, existencias=2.1 → tras +1 caja: (2.1+1)/0.5 = 6.2 (> tope)
+
+    Ambas arrancan cubiertas (no piden nada en Fase 1/2a) y compiten por la
+    única caja de sobrante: debe ir a F6 (queda justo en el límite, 6.0d) y
+    no a F61 (lo superaría).
+    """
+    f6 = _store('F6', consumo=0.5, dias=4.0, existencias=2.0)
+    f61 = _store('F61', consumo=0.5, dias=4.2, existencias=2.1)
+    tiendas, remaining = distribuir_item('X', 1, _df([f6, f61], cajas=1))
+    assert remaining == 0
+
+    f6_row = tiendas.loc[tiendas['store_code'] == 'F6'].iloc[0]
+    f61_row = tiendas.loc[tiendas['store_code'] == 'F61'].iloc[0]
+
+    assert f6_row['cajas_asignadas'] == 1, (
+        "F6 queda justo en TOPE_EXCEDENTE tras recibir — debía ser elegible"
+    )
+    assert f61_row['cajas_asignadas'] == 0, (
+        "F61 superaría TOPE_EXCEDENTE tras recibir — no debía ser elegible"
+    )
+
+    dias_final_f6 = ((f6_row['inventario_efectivo'] + f6_row['cajas_asignadas'])
+                     / f6_row['consumo_diario'])
+    assert dias_final_f6 == pytest.approx(TOPE_EXCEDENTE)
 
 
 if __name__ == '__main__':

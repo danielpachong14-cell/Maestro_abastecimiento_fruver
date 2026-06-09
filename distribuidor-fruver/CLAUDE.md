@@ -47,10 +47,12 @@ tiendas_item.COD SIESA  ↔  celes.Código de Bodega sin prefijo 'BO'
 ## Parámetros del algoritmo (core/algorithm.py)
 
 ```python
-TARGET_DAYS       = 4.0   # días MÍNIMOS de inventario proyectado objetivo por tienda
+TARGET_DAYS       = 3.0   # días MÍNIMOS de inventario proyectado objetivo por tienda
 MIN_STOCK_AGOTADO = 0.3   # inventario_efectivo < 0.3 cajas → AGOTADA (prioridad máxima)
-MIN_STOCK_SAFETY  = 0.5   # inventario_efectivo < 0.5 cajas → STOCK SEGURIDAD
+MIN_STOCK_SAFETY  = 0.8   # inventario_efectivo < 0.8 cajas → STOCK SEGURIDAD
 MIN_CAJAS_INICIAL = 3     # cap de cajas por tienda en la primera pasada
+MAX_CAJAS_POR_ITEM = 3    # tope duro: máximo que una tienda recibe por ítem (todas las fases)
+TOPE_EXCEDENTE    = 14    # máximo días que puede acumular una tienda del excedente
 ```
 
 ## Lógica de inventario
@@ -72,22 +74,42 @@ Los umbrales AGOTADO y SAFETY se miden en **unidades de stock** (cajas), no en d
 
 ```
 Priority 3 (AGOTADO):      inventario_efectivo < 0.3 cajas → mínimo 1 caja, primera en recibir
-Priority 2 (SAFETY):       inventario_efectivo < 0.5 cajas → mínimo 1 caja
-Priority 1 (REPOSICIÓN):   dias_proyectados < 4.0          → cajas para llegar a 4 días
-Priority 0 (CUBIERTO):     dias_proyectados ≥ 4.0          → solo recibe si sobra inventario
+Priority 2 (SAFETY):       inventario_efectivo < 0.8 cajas → mínimo 1 caja
+Priority 1 (REPOSICIÓN):   dias_proyectados < 3.0          → cajas para llegar a 3 días
+Priority 0 (CUBIERTO):     dias_proyectados ≥ 3.0          → solo recibe si sobra inventario
 ```
 
 ## Distribución del sobrante
 
-Los 4 días son el **mínimo**, no el máximo. Si quedan cajas sin asignar tras el pase 1,
-se suben pases adicionales (cap 4, 5, 6…) ordenando las tiendas por **menos días proyectados**:
+`TARGET_DAYS` es el **mínimo**, no el máximo. Lo que sobra tras cubrir a todas las
+tiendas se reparte por rondas, **proporcional a `consumo_diario / días_actuales`**
+(equivalente a `consumo_diario² / stock_actual`) entre las tiendas elegibles
+(`consumo > 0`, que tras recibir una caja más sigan bajo `TOPE_EXCEDENTE` días, y que
+no superen `MAX_CAJAS_POR_ITEM` cajas por entrega), con corrección Hamilton para que
+la suma entera cuadre exacto:
 
 ```
 dias_actuales = (inventario_efectivo + cajas_ya_asignadas) / consumo_diario
+peso_tienda   = consumo_diario / dias_actuales
 ```
 
-Ejemplo: tienda A (consumo=1.0, stock=7 cajas) vs tienda B (consumo=0.9, stock=3 cajas).
-B tiene 3.3 días proyectados vs A con 7.0 → B recibe primero aunque A tenga más consumo.
+**Por qué ese peso y no "1 caja por tienda" ni "proporcional al consumo a secas"**:
+repartir la MISMA CANTIDAD DE CAJAS reparte cantidades MUY DISTINTAS de DÍAS
+(`Δdías ≈ cajas / consumo`), y el consumo varía hasta ~12x entre tiendas — la tienda
+lenta gana muchos más días por caja que la rápida, generando el desbalance opuesto al
+deseado (tiendas de bajo consumo terminan con más días que las de alto consumo).
+Ponderar por `consumo_diario / días_actuales` combina ambas señales — cuánto vende
+y qué tan atrás va respecto al resto — y produce `Δdías_i = k / días_i`: la tienda
+más atrasada gana más días por ronda, cerrando la brecha en vez de mantenerla.
+
+Ejemplo: tienda A (consumo=1.0, stock=7 cajas → 7.0 días, peso=0.14) vs tienda B
+(consumo=0.9, stock=3 cajas → 3.3 días, peso=0.27). B tiene mayor peso (va más
+atrasada relativo a su consumo) → B recibe la caja sobrante, no A.
+
+Si todas las tiendas elegibles llegan a `MAX_CAJAS_POR_ITEM` o `TOPE_EXCEDENTE`
+(caso extremo, raro en la práctica), un "Paso B" de cero-residuo reparte lo que
+quede por menor `días_actuales`, ignorando `MAX_CAJAS_POR_ITEM` — la garantía de
+cero residuo tiene prioridad sobre el tope de cajas por entrega.
 
 ## Elegibilidad
 

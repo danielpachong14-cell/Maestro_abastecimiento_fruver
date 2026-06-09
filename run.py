@@ -69,7 +69,7 @@ def main():
 
     OUTPUT.mkdir(exist_ok=True)
     filename = OUTPUT / f"distribucion_fruver_{date.today().strftime('%Y%m%d')}.xlsx"
-    filename.write_bytes(generate_excel(df_output, alertas))
+    filename.write_bytes(generate_excel(df_output, alertas, df_merged))
     print(f"\nArchivo generado: {filename}")
 
 

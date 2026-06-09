@@ -43,7 +43,7 @@ if submitted:
             dfs = load_files(stock_file, celes_file, portafolio_file, tiendas_file, tiendas_item_file, excluidas_file)
             df_merged = build_distribution_df(dfs)
             df_output, alertas = run_distribution(df_merged)
-            excel_bytes = generate_excel(df_output, alertas)
+            excel_bytes = generate_excel(df_output, alertas, df_merged)
         except ValueError as e:
             st.error(str(e))
             st.stop()

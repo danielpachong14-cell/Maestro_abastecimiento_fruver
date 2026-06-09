@@ -19,13 +19,19 @@ elegibles de cada ítem en tres fases:
     Cuando el stock SÍ alcanza, cada tienda recibe exactamente lo que necesita
     y el verdadero sobrante va a Fase 2b.
 
-  FASE 2b — sobrante equitativo hasta el tope:
-    El sobrante se da por rondas a las tiendas con MENOS cajas totales
-    recibidas (consumo > 0, bajo TOPE_EXCEDENTE días). Esto evita que
-    las tiendas de mayor consumo acumulen el excedente desproporcionalmente.
-    Tiendas sin consumo solo reciben en Fase 1 si están AGOTADAS o en SAFETY.
-    Ninguna tienda supera MAX_CAJAS_POR_ITEM cajas por ítem en el total de fases
-    (Paso B, fallback de cero residuo, queda sin este tope).
+  FASE 2b — sobrante repartido por días, no por cajas:
+    Repartir la misma CANTIDAD DE CAJAS a tiendas con consumos muy distintos
+    reparte cantidades muy distintas de DÍAS (Δdías ≈ cajas/consumo). Por eso
+    el sobrante se reparte por rondas proporcional a `consumo_diario /
+    días_actuales` entre las tiendas elegibles (consumo > 0, bajo
+    TOPE_EXCEDENTE tras recibir, sin alcanzar aún MAX_CAJAS_POR_ITEM) con
+    corrección Hamilton para los residuos enteros. El resultado: cada tienda
+    gana más días cuanto más atrás vaya respecto al resto (Δdías_i = k /
+    días_i), cerrando la brecha en lugar de mantenerla o ampliarla — sin que
+    ninguna reciba más cajas por entrega que MAX_CAJAS_POR_ITEM (límite de
+    espacio en tienda). Tiendas sin consumo solo reciben en Fase 1 si están
+    AGOTADAS o en SAFETY. Si todas llegan al tope (caso extremo), un Paso B de
+    cero-residuo reparte por menor días proyectados ignorando ese límite.
 """
 
 import math
@@ -33,11 +39,11 @@ import math
 import pandas as pd
 
 TARGET_DAYS = 3.0           # días objetivo de inventario proyectado por tienda
-MIN_STOCK_AGOTADO = 0.4     # por debajo de este STOCK (unidades) = AGOTADA
-MIN_STOCK_SAFETY = 0.7      # por debajo de este STOCK (unidades) = STOCK SEGURIDAD
-MIN_CAJAS_INICIAL = 2       # cap de cajas por tienda en Fase 1 (por ronda)
+MIN_STOCK_AGOTADO = 0.3     # por debajo de este STOCK (unidades) = AGOTADA
+MIN_STOCK_SAFETY = 0.6      # por debajo de este STOCK (unidades) = STOCK SEGURIDAD
+MIN_CAJAS_INICIAL = 3       # cap de cajas por tienda en Fase 1 (por ronda)
 MAX_CAJAS_POR_ITEM = 3      # tope duro: máximo que una tienda recibe por ítem (todas las fases)
-TOPE_EXCEDENTE = 5        # máximo días que puede acumular una tienda del excedente
+TOPE_EXCEDENTE = 6       # máximo días que puede acumular una tienda del excedente
 
 
 def get_priority(row):
@@ -69,6 +75,44 @@ def _calc_deseadas(row, cap):
     cajas_needed = math.ceil(max(0.0, TARGET_DAYS * row.consumo_diario - row.inventario_efectivo))
     min_boxes = 1 if row.priority >= 2 else 0
     return max(min_boxes, min(cajas_needed, cap))
+
+
+def _reparto_proporcional(pesos, total, room):
+    """Reparte hasta `total` cajas (entero) proporcional a `pesos` (>= 0), sin
+    exceder `room` (espacio restante) por tienda. Usa piso + corrección
+    Hamilton para que la suma entera coincida con `total` — o con `room.sum()`
+    si éste es menor — repartiendo el residuo a quienes tienen mayor fracción
+    pendiente y todavía tienen espacio.
+
+    Si el peso de cada tienda es proporcional a su `consumo_diario`, el
+    incremento de stock resultante también lo es (`Δstock_i = k · peso_i`), lo
+    que hace que el incremento de días proyectados (`Δdías_i = Δstock_i /
+    consumo_i`) sea igual para todas — reparte días, no solo cajas.
+
+    Retorna una Series de enteros con las cajas asignadas en esta pasada
+    (mismo índice que `pesos`).
+    """
+    asignado = pd.Series(0, index=pesos.index, dtype=int)
+    total_pesos = float(pesos.sum())
+    total = int(total)
+    if total_pesos <= 0 or total <= 0:
+        return asignado
+
+    objetivo = (pesos / total_pesos * total).clip(upper=room)
+    piso = objetivo.apply(math.floor).astype(int)
+    asignado += piso
+    sobra = total - int(piso.sum())
+
+    if sobra > 0:
+        espacio = room - piso
+        fracs = (objetivo - piso).where(espacio > 0, -1.0).sort_values(ascending=False)
+        for idx in fracs.index:
+            if sobra <= 0 or fracs[idx] < 0:
+                break
+            asignado[idx] += 1
+            sobra -= 1
+
+    return asignado
 
 
 def distribuir_item(item_code, cajas_disponibles, tiendas_df):
@@ -132,34 +176,39 @@ def distribuir_item(item_code, cajas_disponibles, tiendas_df):
         total_need = needs.sum()
 
         if total_need > 0:
-            scale = min(1.0, remaining / total_need)
-            scaled = needs * scale
+            # min(remaining, total_need): si el stock alcanza, cada tienda
+            # recibe exactamente su `needs` (ya acotada por `room`); si no
+            # alcanza, `_reparto_proporcional` reparte `remaining` de forma
+            # proporcional a `needs` — equivalente al `scale` anterior, pero
+            # sin arriesgar exceder `room` en la corrección Hamilton.
+            asignado = _reparto_proporcional(needs, min(remaining, total_need), room)
+            tiendas['cajas_asignadas'] += asignado
+            tiendas['cajas_fase2a'] += asignado
+            remaining -= int(asignado.sum())
 
-            floor_s = scaled.apply(math.floor).astype(int)
-            tiendas['cajas_asignadas'] += floor_s
-            tiendas['cajas_fase2a'] += floor_s
-            remaining -= int(floor_s.sum())
-
-            # Corrección Hamilton: el residuo va a las tiendas con mayor fracción pendiente.
-            if remaining > 0:
-                fracs = (scaled - floor_s).sort_values(ascending=False)
-                for idx in fracs.index:
-                    if remaining <= 0:
-                        break
-                    tiendas.at[idx, 'cajas_asignadas'] += 1
-                    tiendas.at[idx, 'cajas_fase2a'] += 1
-                    remaining -= 1
-
-    # FASE 2b — excedente: dar 1 caja por ronda a la tienda con menor días
-    # proyectados (solo consumo > 0, respetando tope de TOPE_EXCEDENTE días).
-    # Así la tienda con menos inventario relativo recibe antes que la que ya
-    # tiene mucho acumulado, aunque esta última venda más.
+    # FASE 2b — excedente: repartir cada ronda proporcional a
+    # `consumo_diario / días_actuales` entre las tiendas elegibles (consumo > 0,
+    # bajo TOPE_EXCEDENTE tras recibir, sin alcanzar aún MAX_CAJAS_POR_ITEM).
+    #
+    # Por qué ese peso y no "1 caja por tienda" ni "proporcional al consumo a
+    # secas": repartir cantidades IGUALES de cajas reparte cantidades MUY
+    # DESIGUALES de días (Δdías ≈ cajas / consumo, y el consumo varía hasta
+    # ~12x entre tiendas) — la tienda lenta gana muchos más días por caja que
+    # la rápida, que es justo el desbalance que se busca evitar. Ponderar por
+    # `consumo_diario / días_actuales` (= consumo² / stock) dosifica el
+    # excedente según dos señales: cuánto vende (consumo) y qué tan atrás va
+    # respecto al resto (1/días); el resultado es que el incremento de días de
+    # cada tienda es inversamente proporcional a sus días actuales
+    # (Δdías_i = k / días_i): las que van más atrasadas se acercan más rápido
+    # al resto en lugar de mantener — o ampliar — la brecha.
     if remaining > 0:
         con_consumo_mask = tiendas['consumo_diario'] > 0
 
         if con_consumo_mask.any():
-            # Paso A: round-robin por rondas entre elegibles bajo el tope,
-            # ordenadas por menos cajas_asignadas (anti-concentración directa).
+            # Paso A: por rondas — cada ronda puede sacar tiendas de la
+            # elegibilidad (alcanzan el tope de días o el máximo de cajas), así
+            # que se recalcula el peso y el espacio disponible y se reparte de
+            # nuevo lo que quede entre las que siguen elegibles.
             prev = remaining + 1
             while remaining > 0 and remaining < prev:
                 prev = remaining
@@ -169,29 +218,40 @@ def distribuir_item(item_code, cajas_disponibles, tiendas_df):
                     stock_act[con_consumo_mask]
                     / tiendas.loc[con_consumo_mask, 'consumo_diario']
                 )
+                # Elegible si, tras recibir una caja más, sigue bajo el tope —
+                # evita que una sola caja empuje a una tienda lenta muy por
+                # encima de TOPE_EXCEDENTE (chequear con `dias_act` permitía
+                # el sobrepaso porque medía el estado ANTES de asignar).
+                dias_tras_una = pd.Series(float('inf'), index=tiendas.index)
+                dias_tras_una[con_consumo_mask] = (
+                    (stock_act[con_consumo_mask] + 1)
+                    / tiendas.loc[con_consumo_mask, 'consumo_diario']
+                )
                 elegibles_mask = (
                     con_consumo_mask
-                    & (dias_act < TOPE_EXCEDENTE)
+                    & (dias_tras_una <= TOPE_EXCEDENTE)
                     & (tiendas['cajas_asignadas'] < MAX_CAJAS_POR_ITEM)
                 )
                 if not elegibles_mask.any():
                     break
-                elegibles = (tiendas[elegibles_mask]
-                             .sort_values('cajas_asignadas', ascending=True)
-                             .index.tolist())
-                for idx in elegibles:
-                    if remaining <= 0:
-                        break
-                    tiendas.at[idx, 'cajas_asignadas'] += 1
-                    tiendas.at[idx, 'cajas_fase2b'] += 1
-                    remaining -= 1
+                pesos = (tiendas['consumo_diario'] / dias_act.replace(0, float('nan'))).where(elegibles_mask, 0.0)
+                pesos = pesos.fillna(0.0)
+                room = ((MAX_CAJAS_POR_ITEM - tiendas['cajas_asignadas'])
+                        .clip(lower=0)
+                        .where(elegibles_mask, 0))
+                asignado = _reparto_proporcional(pesos, remaining, room)
+                tiendas['cajas_asignadas'] += asignado
+                tiendas['cajas_fase2b'] += asignado
+                remaining -= int(asignado.sum())
 
-            # Paso B: si todas llegaron al tope, round-robin entre consumo > 0
-            # (garantía de 0 residuo sin involucrar tiendas sin consumo).
+            # Paso B: si todas llegaron al tope (caso extremo), red de
+            # seguridad de cero-residuo por menos días proyectados — ignora
+            # MAX_CAJAS_POR_ITEM porque ya no hay tiendas elegibles bajo tope.
             if remaining > 0:
-                order = (tiendas[con_consumo_mask]
-                         .sort_values('consumo_diario', ascending=False)
-                         .index.tolist())
+                stock_act = tiendas['inventario_efectivo'] + tiendas['cajas_asignadas']
+                dias_act = (stock_act[con_consumo_mask]
+                            / tiendas.loc[con_consumo_mask, 'consumo_diario'])
+                order = dias_act.sort_values(ascending=True).index.tolist()
                 i = 0
                 while remaining > 0:
                     tiendas.at[order[i % len(order)], 'cajas_asignadas'] += 1
