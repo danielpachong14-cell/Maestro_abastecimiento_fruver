@@ -19,8 +19,7 @@ REQUIRED_COLUMNS = {
               'UM'],
     'portafolio': ['ITEM', 'CLUSTERIZACIÓN', 'ESTADO'],
     'tiendas': ['COD SIESA', 'NOMBRE DE LA TIENDA', 'TIPO DE PORTAFOLIO', 'ZONA'],
-    'tiendas_item': ['COD SIESA', 'TIPO DE PORTAFOLIO',
-                     'DB_Portafolio_Fruver.ITEM', 'DB_Portafolio_Fruver.ESTADO'],
+    'tiendas_item': ['COD SIESA', 'TIPO DE PORTAFOLIO', 'ITEM', 'ESTADO'],
     'excluidas': ['Centro Operacional de la Bodega'],
 }
 

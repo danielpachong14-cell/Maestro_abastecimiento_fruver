@@ -78,8 +78,8 @@ def build_distribution_df(dfs):
 
     # 3. TIENDAS × ÍTEM: solo combinaciones activas. Fuente de verdad de elegibilidad.
     tiendas_item = dfs['tiendas_item'].copy()
-    tiendas_item = tiendas_item[_is_active(tiendas_item['DB_Portafolio_Fruver.ESTADO'])].copy()
-    tiendas_item['item_key'] = tiendas_item['DB_Portafolio_Fruver.ITEM'].apply(normalize_item)
+    tiendas_item = tiendas_item[_is_active(tiendas_item['ESTADO'])].copy()
+    tiendas_item['item_key'] = tiendas_item['ITEM'].apply(normalize_item)
     tiendas_item = tiendas_item.dropna(subset=['item_key'])
     tiendas_item['item_key'] = tiendas_item['item_key'].astype(int)
     tiendas_item['COD SIESA'] = tiendas_item['COD SIESA'].astype(str).str.strip()
@@ -136,8 +136,8 @@ def build_distribution_df(dfs):
     })
 
     # Descripción del ítem: preferir la del portafolio, caer a la del stock.
-    if 'DB_Portafolio_Fruver.DESCRIPCION' in merged.columns:
-        merged['item_desc'] = merged['DB_Portafolio_Fruver.DESCRIPCION'].fillna(merged['Desc. item'])
+    if 'DESCRIPCION' in merged.columns:
+        merged['item_desc'] = merged['DESCRIPCION'].fillna(merged['Desc. item'])
     else:
         merged['item_desc'] = merged['Desc. item']
 
