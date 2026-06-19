@@ -44,6 +44,8 @@ MIN_STOCK_SAFETY = 0.6      # por debajo de este STOCK (unidades) = STOCK SEGURI
 MIN_CAJAS_INICIAL = 3       # cap de cajas por tienda en Fase 1 (por ronda)
 MAX_CAJAS_POR_ITEM = 3      # tope duro: máximo que una tienda recibe por ítem (todas las fases)
 TOPE_EXCEDENTE = 6       # máximo días que puede acumular una tienda del excedente
+UMBRAL_CONCENTRACION_SIN_CONSUMO = 5  # cajas: si Paso B concentraría >= esto en 1 tienda
+                                       # por falta de consumo en el resto, reparto equitativo
 
 
 def get_priority(row):
@@ -118,8 +120,10 @@ def _reparto_proporcional(pesos, total, room):
 def distribuir_item(item_code, cajas_disponibles, tiendas_df):
     """Distribuye `cajas_disponibles` de un ítem entre sus tiendas elegibles.
 
-    Retorna (tiendas_df_con_asignacion, remaining). remaining debe ser 0; si es
-    > 0 significa que no hubo tiendas suficientes para absorber el inventario.
+    Retorna (tiendas_df_con_asignacion, remaining, alertas_item). remaining debe
+    ser 0; si es > 0 significa que no hubo tiendas suficientes para absorber el
+    inventario. alertas_item es una lista (posiblemente vacía) de dicts
+    {tipo, item, mensaje, ...} con advertencias detectadas durante el reparto.
     """
     tiendas = tiendas_df.copy()
     tiendas['priority'] = tiendas.apply(get_priority, axis=1)
@@ -128,9 +132,10 @@ def distribuir_item(item_code, cajas_disponibles, tiendas_df):
     tiendas['cajas_fase2a'] = 0
     tiendas['cajas_fase2b'] = 0
     remaining = int(cajas_disponibles)
+    alertas_item = []
 
     if len(tiendas) == 0:
-        return tiendas, remaining
+        return tiendas, remaining, alertas_item
 
     # Orden: prioridad DESC, consumo DESC (agotados y mejores vendedores primero).
     tiendas = tiendas.sort_values(
@@ -252,12 +257,50 @@ def distribuir_item(item_code, cajas_disponibles, tiendas_df):
                 dias_act = (stock_act[con_consumo_mask]
                             / tiendas.loc[con_consumo_mask, 'consumo_diario'])
                 order = dias_act.sort_values(ascending=True).index.tolist()
-                i = 0
-                while remaining > 0:
-                    tiendas.at[order[i % len(order)], 'cajas_asignadas'] += 1
-                    tiendas.at[order[i % len(order)], 'cajas_fase2b'] += 1
-                    remaining -= 1
-                    i += 1
+
+                n_con_consumo = int(con_consumo_mask.sum())
+                n_sin_consumo = len(tiendas) - n_con_consumo
+                max_concentracion = math.ceil(remaining / n_con_consumo)
+
+                if max_concentracion >= UMBRAL_CONCENTRACION_SIN_CONSUMO and n_sin_consumo > 0:
+                    # El reparto normal de Paso B (solo tiendas con consumo>0)
+                    # concentraría demasiadas cajas en pocas tiendas porque el
+                    # resto del portafolio no tiene datos de venta para este
+                    # ítem. En su lugar, repartir parejo entre TODAS las
+                    # tiendas del portafolio activo del ítem.
+                    tienda_concentracion = tiendas.at[order[0], 'store_code']
+                    remaining_original = remaining
+                    while remaining > 0:
+                        idx_min = tiendas['cajas_asignadas'].idxmin()
+                        tiendas.at[idx_min, 'cajas_asignadas'] += 1
+                        tiendas.at[idx_min, 'cajas_fase2b'] += 1
+                        remaining -= 1
+                    alertas_item.append({
+                        'tipo': 'ADVERTENCIA',
+                        'item': item_code,
+                        'mensaje': (
+                            f"Ítem {item_code}: solo {n_con_consumo} de {len(tiendas)} "
+                            f"tienda(s) del portafolio tienen consumo registrado "
+                            f"({n_sin_consumo} sin datos de venta) — el sobrante se iba a "
+                            f"concentrar en {tienda_concentracion} (+{max_concentracion} "
+                            f"cajas). Se aplicó reparto equitativo entre las {len(tiendas)} "
+                            f"tiendas del portafolio activo. Revisar si faltan datos de "
+                            f"venta o si llegó más inventario del que la demanda real del "
+                            f"ítem justifica."
+                        ),
+                        'cajas_redistribuidas': int(remaining_original),
+                        'tiendas_sin_consumo': int(n_sin_consumo),
+                        'tiendas_con_consumo': int(n_con_consumo),
+                        'tienda_concentracion_original': str(tienda_concentracion),
+                        'cajas_concentracion_original': int(max_concentracion),
+                    })
+                else:
+                    i = 0
+                    while remaining > 0:
+                        tiendas.at[order[i % len(order)], 'cajas_asignadas'] += 1
+                        tiendas.at[order[i % len(order)], 'cajas_fase2b'] += 1
+                        remaining -= 1
+                        i += 1
         else:
             # Sin consumo en ninguna tienda: round-robin hasta vaciar (caso extremo).
             indices = list(tiendas.index)
@@ -268,7 +311,7 @@ def distribuir_item(item_code, cajas_disponibles, tiendas_df):
                 remaining -= 1
                 i += 1
 
-    return tiendas, remaining
+    return tiendas, remaining, alertas_item
 
 
 def run_distribution(df_merged):
@@ -293,7 +336,8 @@ def run_distribution(df_merged):
         if cajas_disponibles <= 0:
             continue  # skip silencioso: ítem sin stock en cajas
 
-        tiendas_result, remaining = distribuir_item(item_code, cajas_disponibles, group)
+        tiendas_result, remaining, alertas_item = distribuir_item(item_code, cajas_disponibles, group)
+        alertas.extend(alertas_item)
 
         if remaining > 0:
             alertas.append({
