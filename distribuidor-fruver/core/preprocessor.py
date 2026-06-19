@@ -13,6 +13,11 @@ crucen correctamente (validados contra los datos de producción):
 Además, para el cálculo de necesidad/prioridad se conserva el inventario en
 tránsito («(-) inventario de traslado en proceso»), de modo que el inventario
 efectivo de cada tienda sea Existencias + Tránsito.
+
+DB_Tiendas es la única fuente de tiendas activas: el cruce final con ella es
+inner, no left — Celes y Tiendas×Ítem pueden traer tiendas que ya no operan
+(cerradas, dadas de baja) y esas quedan excluidas del reparto aunque tengan
+datos de consumo o portafolio activo.
 """
 
 import math
@@ -158,10 +163,13 @@ def build_distribution_df(dfs):
         np.inf,
     )
 
-    # 10. Agregar zona desde DB_Tiendas.
+    # 10. Restringir a tiendas activas (DB_Tiendas) y agregar su zona.
+    # DB_Tiendas es la única fuente de tiendas activas: Celes y Tiendas×Ítem
+    # pueden traer tiendas que ya no operan (cerradas, dadas de baja), así que
+    # el cruce es inner — quien no esté en DB_Tiendas queda fuera del reparto.
     tiendas = dfs['tiendas'][['COD SIESA', 'ZONA']].copy()
     tiendas['COD SIESA'] = tiendas['COD SIESA'].astype(str).str.strip()
-    merged = merged.merge(tiendas, left_on='store_code', right_on='COD SIESA', how='left')
+    merged = merged.merge(tiendas, left_on='store_code', right_on='COD SIESA', how='inner')
     merged['zona'] = merged['ZONA'].fillna('').astype(str).str.strip()
     merged = merged.drop(columns=['COD SIESA_y'] if 'COD SIESA_y' in merged.columns else [], errors='ignore')
     merged = merged.drop(columns=['ZONA'], errors='ignore')
