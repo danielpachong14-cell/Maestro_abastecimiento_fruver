@@ -10,7 +10,7 @@ from core.preprocessor import build_distribution_df
 
 st.set_page_config(page_title="Distribuidor Fruver", page_icon="🥬", layout="wide")
 st.title("Distribuidor Fruver — Isimo")
-st.caption("Distribuye el inventario CEDI a las tiendas activas. Sube los 5 archivos y descarga el resultado.")
+st.caption("Distribuye el inventario CEDI a las tiendas activas. Sube los 6 archivos y descarga el resultado.")
 
 with st.form("upload_form"):
     col1, col2 = st.columns(2)
@@ -18,6 +18,7 @@ with st.form("upload_form"):
         stock_file       = st.file_uploader("Stock CEDI (Siesa)", type=["xlsx", "xls"])
         celes_file       = st.file_uploader("Celes (consumos)", type=["xlsx", "xls"])
         portafolio_file  = st.file_uploader("Portafolio Fruver", type=["xlsx", "xls"])
+        espejo_file       = st.file_uploader("Productos Espejo", type=["xlsx", "xls"])
     with col2:
         tiendas_file      = st.file_uploader("Base de Tiendas", type=["xlsx", "xls"])
         tiendas_item_file = st.file_uploader("Tiendas × Ítem", type=["xlsx", "xls"])
@@ -32,6 +33,7 @@ if submitted:
         "Portafolio": portafolio_file,
         "Tiendas": tiendas_file,
         "Tiendas × Ítem": tiendas_item_file,
+        "Productos Espejo": espejo_file,
     }
     faltantes = [nombre for nombre, f in archivos.items() if f is None]
     if faltantes:
@@ -40,7 +42,7 @@ if submitted:
 
     with st.spinner("Procesando..."):
         try:
-            dfs = load_files(stock_file, celes_file, portafolio_file, tiendas_file, tiendas_item_file, excluidas_file)
+            dfs = load_files(stock_file, celes_file, portafolio_file, tiendas_file, tiendas_item_file, espejo_file, excluidas_file)
             df_merged = build_distribution_df(dfs)
             df_output, alertas = run_distribution(df_merged)
             excel_bytes = generate_excel(df_output, alertas, df_merged)

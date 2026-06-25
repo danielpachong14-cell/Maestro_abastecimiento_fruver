@@ -181,10 +181,43 @@ def build_distribution_df(dfs):
         excl_codes = set(excl['Centro Operacional de la Bodega'].astype(str).str.strip())
         merged = merged[~merged['store_code'].isin(excl_codes)]
 
+    # 12. PRODUCTOS ESPEJO: ítems que son el mismo producto físico bajo distinto
+    # código de SKU compiten por la misma demanda en tienda. Se les asigna un
+    # grupo común para que prioridad/necesidad se calculen sobre el conjunto y
+    # no se dupliquen — la distribución física sigue siendo por ítem real.
+    # Un ítem sin entrada en el archivo espejo queda en un grupo de tamaño 1
+    # (su propio item_code), por lo que las fórmulas de grupo colapsan a los
+    # valores individuales actuales: cero cambio de comportamiento.
+    espejo = dfs['espejo'].copy()
+    espejo['item_key'] = espejo['item_id'].apply(normalize_item)
+    espejo = espejo.dropna(subset=['item_key', 'grupo_id'])
+    item_to_grupo = dict(zip(espejo['item_key'].astype(int), espejo['grupo_id'].astype(str)))
+
+    merged['grupo_id'] = merged['item_code'].map(item_to_grupo)
+    sin_grupo = merged['grupo_id'].isna()
+    merged.loc[sin_grupo, 'grupo_id'] = 'ITEM_' + merged.loc[sin_grupo, 'item_code'].astype(str)
+
+    merged['consumo_diario_grupo'] = merged.groupby(['store_code', 'grupo_id'])['consumo_diario'].transform('sum')
+    merged['inventario_efectivo_grupo'] = merged.groupby(['store_code', 'grupo_id'])['inventario_efectivo'].transform('sum')
+    merged['dias_proyectados_grupo'] = np.where(
+        merged['consumo_diario_grupo'] > 0,
+        merged['inventario_efectivo_grupo'] / merged['consumo_diario_grupo'].replace(0, np.nan),
+        np.inf,
+    )
+
+    n_items_grupo = merged.groupby(['store_code', 'grupo_id'])['item_code'].transform('size')
+    merged['item_share_consumo'] = np.where(
+        merged['consumo_diario_grupo'] > 0,
+        merged['consumo_diario'] / merged['consumo_diario_grupo'].replace(0, np.nan),
+        1.0 / n_items_grupo,
+    )
+
     cols_out = [
         'item_code', 'item_desc', 'store_code', 'store_name', 'zona',
         'consumo_diario', 'dias_inventario_actuales', 'inventario_tienda',
         'inventario_transito', 'inventario_efectivo', 'dias_proyectados',
         'cajas_disponibles_cedi', 'um', 'vida_util',
+        'grupo_id', 'consumo_diario_grupo', 'inventario_efectivo_grupo',
+        'dias_proyectados_grupo', 'item_share_consumo',
     ]
     return merged[cols_out].reset_index(drop=True)

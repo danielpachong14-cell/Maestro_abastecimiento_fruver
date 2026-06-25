@@ -10,6 +10,7 @@ from core.algorithm import (
     TARGET_DAYS,
     TOPE_EXCEDENTE,
     UMBRAL_CONCENTRACION_SIN_CONSUMO,
+    _fase2b_grupal,
     distribuir_item,
 )
 
@@ -38,6 +39,13 @@ def _df(rows, item_code='X', cajas=10):
     df['store_name'] = df['store_code']
     df['um'] = 'UND'
     df['item_desc'] = 'Producto X'
+    # Sin grupo espejo en estos tests: cada ítem es su propio grupo de tamaño
+    # 1, así que las métricas de grupo colapsan a las del ítem individual.
+    df['grupo_id'] = 'ITEM_' + str(item_code)
+    df['consumo_diario_grupo'] = df['consumo_diario']
+    df['inventario_efectivo_grupo'] = df['inventario_efectivo']
+    df['dias_proyectados_grupo'] = df['dias_proyectados']
+    df['item_share_consumo'] = 1.0
     return df
 
 
@@ -346,6 +354,164 @@ def test_sin_concentracion_no_genera_alerta():
     tiendas, remaining, alertas_item = distribuir_item('X', 8, _df([p, q], cajas=8))
     assert remaining == 0
     assert alertas_item == []
+
+
+def test_grupo_espejo_no_duplica_reposicion():
+    """Dos ítems espejo (mismo producto físico, distinto SKU) en la misma
+    tienda: si el inventario COMBINADO del grupo ya alcanza TARGET_DAYS, no
+    debe pedirse reposición para ninguno por separado — el bug reportado por
+    el usuario (cada SKU pedía sus propios 3 días de cobertura, duplicando la
+    cantidad real necesaria por la tienda).
+
+    Tienda T, grupo G1: item A (consumo=0.5) e item B (consumo=0.5), cada uno
+    visto SOLO tiene apenas 1 caja (2 días, por debajo de TARGET_DAYS=3 → con
+    la lógica vieja, ambos pedirían reposición). Pero combinados, el grupo
+    tiene 2.0 cajas / 1.0 consumo = 2.0... ajustamos a inventario_grupo=3.0
+    para que dias_proyectados_grupo = 3.0 = TARGET_DAYS exacto (cubierto).
+    """
+    row = pd.Series({
+        'consumo_diario': 0.5,
+        'inventario_efectivo': 1.0,
+        'priority': 0,
+        'consumo_diario_grupo': 1.0,
+        'inventario_efectivo_grupo': 3.0,
+        'dias_proyectados_grupo': TARGET_DAYS,
+        'item_share_consumo': 0.5,
+    })
+    from core.algorithm import _calc_deseadas, get_priority
+    assert get_priority(row) == 0, "Grupo cubierto (3.0 dias == TARGET_DAYS) -> prioridad CUBIERTA"
+    assert _calc_deseadas(row, cap=3) == 0, (
+        "El grupo ya está cubierto; el ítem A no debía pedir reposición aunque "
+        "visto solo (1.0 caja / 0.5 consumo = 2.0 días) sí la pediría con la "
+        "lógica antigua — el punto del test es que ahora usa la métrica de "
+        "GRUPO, no la propia."
+    )
+
+
+def test_item_sin_espejo_comportamiento_idéntico():
+    """Un ítem sin grupo espejo (grupo de tamaño 1) debe comportarse
+    exactamente igual que antes de introducir la lógica de grupo."""
+    rows = [_store('AGOTADA', 0.4, 0.0, existencias=0.0, transito=0.0),
+            _store('OK', 5.0, 10.0, existencias=50.0)]
+    tiendas, remaining, _ = distribuir_item('X', 8, _df(rows, cajas=8))
+    assert remaining == 0
+    asignada = tiendas.loc[tiendas['store_code'] == 'AGOTADA', 'cajas_asignadas'].iloc[0]
+    assert asignada >= 1
+
+
+def _tienda_post_fase2a(store_code, consumo, inventario_efectivo, item_share_consumo, cajas_asignadas=0):
+    """Fila de tienda ya resuelta en Fase 1/2a (lista para alimentar
+    _fase2b_grupal / _fase2b_individual directamente)."""
+    return {
+        'store_code': store_code,
+        'consumo_diario': consumo,
+        'inventario_efectivo': inventario_efectivo,
+        'item_share_consumo': item_share_consumo,
+        'cajas_asignadas': cajas_asignadas,
+        'cajas_fase1': 0,
+        'cajas_fase2a': 0,
+        'cajas_fase2b': 0,
+    }
+
+
+def _estado(rows, remaining):
+    return {'tiendas': pd.DataFrame(rows), 'remaining': remaining}
+
+
+def test_fase2b_grupal_garantiza_presencia_y_respeta_tope_por_item():
+    """Tienda T, grupo con ítems A y B (consumo y participación simétricos
+    50/50). A ya tiene 1.0 caja en góndola; B tiene 0 (no está en góndola
+    aunque el CEDI sí tenga stock de B). Tras la Fase 2b grupal:
+      - B debe recibir al menos 1 caja (garantía de presencia), no solo lo
+        que le tocaría por su participación en el consumo.
+      - Ningún ítem debe superar MAX_CAJAS_POR_ITEM (tope individual, no de
+        grupo) aunque haya CEDI de sobra para ambos.
+      - Cero residuo: con estos números exactos, ambos pools quedan en 0.
+    """
+    estado_items = {
+        'A': _estado([_tienda_post_fase2a('T', consumo=1.0, inventario_efectivo=1.0,
+                                           item_share_consumo=0.5)], remaining=3),
+        'B': _estado([_tienda_post_fase2a('T', consumo=1.0, inventario_efectivo=0.0,
+                                           item_share_consumo=0.5)], remaining=3),
+    }
+    resultado, alertas = _fase2b_grupal(estado_items)
+
+    a_asig = int(resultado['A']['tiendas'].loc[0, 'cajas_asignadas'])
+    b_asig = int(resultado['B']['tiendas'].loc[0, 'cajas_asignadas'])
+
+    assert b_asig >= 1, "B (0 unidades en góndola) debía recibir al menos 1 caja garantizada"
+    assert a_asig <= MAX_CAJAS_POR_ITEM, "A no debía superar MAX_CAJAS_POR_ITEM"
+    assert b_asig <= MAX_CAJAS_POR_ITEM, "B no debía superar MAX_CAJAS_POR_ITEM"
+    assert resultado['A']['remaining'] == 0
+    assert resultado['B']['remaining'] == 0
+    assert a_asig + resultado['A']['remaining'] == 3
+    assert b_asig + resultado['B']['remaining'] == 3
+
+
+def test_fase2b_grupal_tope_excedente_es_del_grupo_no_del_item():
+    """Dos tiendas, mismo grupo (A, B):
+
+      T1: A tiene consumo bajísimo (0.1) pero MUCHO inventario (70 cajas,
+          700 días solo) — arrastra el GRUPO muy por encima de
+          TOPE_EXCEDENTE aunque B, visto solo, tenga 0 días (luciría urgente
+          con la lógica antigua por ítem).
+      T2: ambos ítems sanos, grupo en 0.5 días — claramente elegible.
+
+    Con TOPE_EXCEDENTE evaluado a nivel de GRUPO, T1 no debe recibir NADA de
+    sobrante (ni A ni B) — todo el sobrante debe ir a T2, que sí es elegible.
+    Antes de este cambio (Fase 2b por ítem), B en T1 habría calificado igual
+    que cualquier tienda con 0 días y se le habría asignado sobrante.
+    """
+    estado_items = {
+        'A': _estado([
+            _tienda_post_fase2a('T1', consumo=0.1, inventario_efectivo=70.0, item_share_consumo=0.1 / 2.1),
+            _tienda_post_fase2a('T2', consumo=1.0, inventario_efectivo=1.0, item_share_consumo=0.5),
+        ], remaining=2),
+        'B': _estado([
+            _tienda_post_fase2a('T1', consumo=2.0, inventario_efectivo=0.0, item_share_consumo=2.0 / 2.1),
+            _tienda_post_fase2a('T2', consumo=1.0, inventario_efectivo=0.0, item_share_consumo=0.5),
+        ], remaining=2),
+    }
+    resultado, alertas = _fase2b_grupal(estado_items)
+
+    a_t1 = int(resultado['A']['tiendas'].set_index('store_code').loc['T1', 'cajas_asignadas'])
+    b_t1 = int(resultado['B']['tiendas'].set_index('store_code').loc['T1', 'cajas_asignadas'])
+    a_t2 = int(resultado['A']['tiendas'].set_index('store_code').loc['T2', 'cajas_asignadas'])
+    b_t2 = int(resultado['B']['tiendas'].set_index('store_code').loc['T2', 'cajas_asignadas'])
+
+    assert a_t1 == 0 and b_t1 == 0, (
+        "T1 no debía recibir sobrante: el GRUPO ya está muy por encima de "
+        f"TOPE_EXCEDENTE por el inventario de A, aunque B solo luzca urgente "
+        f"(obtuvo A={a_t1}, B={b_t1})"
+    )
+    assert a_t2 > 0 and b_t2 > 0, "T2 (elegible) debía absorber el sobrante"
+    assert resultado['A']['remaining'] == 0
+    assert resultado['B']['remaining'] == 0
+
+
+def test_fase2b_grupal_cero_residuo_delega_a_paso_b_individual():
+    """Una sola tienda, grupo con A y B: el CEDI manda MUCHO más de lo que la
+    tienda puede absorber bajo MAX_CAJAS_POR_ITEM (3 por ítem). El Paso A
+    grupal llena ambos hasta el tope (3 cada uno) y luego se queda sin
+    tiendas elegibles — el remanente de cada ítem debe delegarse al Paso B
+    individual (cero residuo, ignora MAX_CAJAS_POR_ITEM) para que la garantía
+    de cero residuo se cumpla igual que en el camino sin grupo."""
+    estado_items = {
+        'A': _estado([_tienda_post_fase2a('UNICA', consumo=2.0, inventario_efectivo=0.0,
+                                           item_share_consumo=2.0 / 3.0)], remaining=10),
+        'B': _estado([_tienda_post_fase2a('UNICA', consumo=1.0, inventario_efectivo=6.0,
+                                           item_share_consumo=1.0 / 3.0)], remaining=10),
+    }
+    resultado, alertas = _fase2b_grupal(estado_items)
+
+    assert resultado['A']['remaining'] == 0, "Cero residuo debe mantenerse para A vía Paso B individual"
+    assert resultado['B']['remaining'] == 0, "Cero residuo debe mantenerse para B vía Paso B individual"
+
+    a_asig = int(resultado['A']['tiendas'].loc[0, 'cajas_asignadas'])
+    b_asig = int(resultado['B']['tiendas'].loc[0, 'cajas_asignadas'])
+    assert a_asig == 10, "Única tienda del portafolio: debía recibir todo el CEDI de A"
+    assert b_asig == 10, "Única tienda del portafolio: debía recibir todo el CEDI de B"
+    assert a_asig > MAX_CAJAS_POR_ITEM, "Solo el Paso B (cero residuo) ignora MAX_CAJAS_POR_ITEM"
 
 
 if __name__ == '__main__':

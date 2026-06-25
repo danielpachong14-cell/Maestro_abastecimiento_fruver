@@ -20,6 +20,7 @@ REQUIRED_COLUMNS = {
     'portafolio': ['ITEM', 'CLUSTERIZACIÓN', 'ESTADO'],
     'tiendas': ['COD SIESA', 'NOMBRE DE LA TIENDA', 'TIPO DE PORTAFOLIO', 'ZONA'],
     'tiendas_item': ['COD SIESA', 'TIPO DE PORTAFOLIO', 'ITEM', 'ESTADO'],
+    'espejo': ['grupo_id', 'item_id'],
     'excluidas': ['Centro Operacional de la Bodega'],
 }
 
@@ -31,6 +32,7 @@ SHEET_BY_KEY = {
     'portafolio': 0,
     'tiendas': 0,
     'tiendas_item': 0,
+    'espejo': 0,
     'excluidas': 0,
 }
 
@@ -41,6 +43,7 @@ LABELS = {
     'portafolio': 'Portafolio Fruver',
     'tiendas': 'Base de Tiendas',
     'tiendas_item': 'Tiendas × Ítem',
+    'espejo': 'Productos Espejo',
     'excluidas': 'Tiendas sin pedido',
 }
 
@@ -67,12 +70,16 @@ def _validate_columns(df, key):
         )
 
 
-def load_files(stock, celes, portafolio, tiendas, tiendas_item, tiendas_excluidas=None):
+def load_files(stock, celes, portafolio, tiendas, tiendas_item, espejo, tiendas_excluidas=None):
     """Carga y valida los archivos de entrada.
 
     Acepta objetos UploadedFile de Streamlit o rutas/buffers compatibles con
     pandas.read_excel. Retorna un dict con DataFrames o lanza ValueError con
     un mensaje claro si falta una columna.
+
+    espejo es obligatorio: define los grupos de productos espejo (mismo
+    producto físico, distinto código de ítem) usados por el preprocessor
+    para calcular necesidad conjunta por grupo.
 
     tiendas_excluidas es opcional: si se pasa, se carga y valida el archivo
     «Tiendas sin pedido» y se añade al dict bajo la clave 'excluidas'.
@@ -83,6 +90,7 @@ def load_files(stock, celes, portafolio, tiendas, tiendas_item, tiendas_excluida
         'portafolio': portafolio,
         'tiendas': tiendas,
         'tiendas_item': tiendas_item,
+        'espejo': espejo,
     }
     dataframes = {}
     for key, file_obj in inputs.items():

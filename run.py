@@ -29,6 +29,7 @@ FILES = {
     "portafolio":   INPUT / "DB_Portafolio Fruver.xlsx",
     "tiendas":      INPUT / "DB_Tiendas.xlsx",
     "tiendas_item": INPUT / "DB_Tiendas Por itmes y portafolio.xlsx",
+    "espejo":       INPUT / "DB_ProductosEspejo.xlsx",
 }
 
 EXCLUIDAS_PATH = INPUT / "Tiendas_No generar pedido.xlsx"
