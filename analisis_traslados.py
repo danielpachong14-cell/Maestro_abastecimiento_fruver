@@ -2,18 +2,18 @@
 Plan de Traslados Nacional — Análisis de excesos de inventario entre tiendas
 =============================================================================
 Lee los archivos Excel de la carpeta Input/, aplica el algoritmo greedy de
-traslados sobre los 13 cuadrantes nacionales y genera un archivo de salida en
-Output/ con el plan detallado por tienda.
+traslados sobre los cuadrantes nacionales activos y genera un archivo de salida
+en Output/ con el plan detallado por tienda.
 
 Archivos de entrada requeridos (Input/):
-  - DB_Tiendas.xlsx                                           → maestro de tiendas (95 tiendas)
+  - DB_Tiendas.xlsx                                           → maestro de tiendas (94 bodegas únicas)
   - DB_CELES.xlsx  hoja "Items"                              → inventario nacional (~117 000 filas)
   - DB_PORTAFOLIO_FRUVER.xlsx                                → portafolio autorizado FRUVER (Q16)
   - DB_POLITICA_NACIONAL_DIAS_DE_INVENTARIO_POR_CUADRANTE.xlsx → umbrales máximos por cuadrante
 
 Archivo de salida:
-  Output/Plan_Traslados_YYYYMMDD.xlsx  (2 hojas: Resumen Ejecutivo,
-  Traslados Misma Zona)
+  Output/Plan_Traslados_YYYYMMDD.xlsx  (3 hojas: Resumen Ejecutivo,
+  Traslados Misma Zona, Resumen por Tienda)
 
 Ejecución:
     python analisis_traslados.py
@@ -36,26 +36,26 @@ from openpyxl.styles import Alignment, Font, PatternFill
 # En condiciones normales este valor no se usa porque la política cubre todos
 # los cuadrantes activos.
 # ↓ MODIFICABLE
-DIAS_EXCESO_ORIGEN = 15
+DIAS_EXCESO_ORIGEN = 20
 
 # Días de inventario MÍNIMOS que debe conservar la tienda origen después del traslado.
 # Se aplica a todos los cuadrantes por igual.
 # Si el stock no alcanza para conservar este mínimo, no se realiza el traslado.
 # ↓ MODIFICABLE
-DIAS_MINIMO_ORIGEN = 4
+DIAS_MINIMO_ORIGEN = 10
 
 # Cantidad mínima de cajas que debe quedar en la tienda origen, independientemente
 # de los días. Se aplica el máximo entre este valor y DIAS_MINIMO_ORIGEN × consumo.
 # Valor general (fallback) — ver CAJAS_MINIMO_POR_CUADRANTE para excepciones.
 # ↓ MODIFICABLE
-CAJAS_MINIMO_ORIGEN = 0.8
+CAJAS_MINIMO_ORIGEN = 1
 
 # Excepciones al mínimo de cajas por cuadrante (se superponen a CAJAS_MINIMO_ORIGEN).
 # Q17 y Q18 son productos refrigerados/congelados con mayor rotación; la política
 # permite retener menos stock en origen antes de transferir.
 CAJAS_MINIMO_POR_CUADRANTE = {
-    "Q17 - CAVA REFRIGERADO": 0.7,
-    "Q18 - CAVA CONGELADO":   0.5,
+    "Q17 - CAVA REFRIGERADO": 1,
+    "Q18 - CAVA CONGELADO":   0.8,
 }
 
 # Cuadrantes excluidos del análisis de traslados.
@@ -63,18 +63,16 @@ CAJAS_MINIMO_POR_CUADRANTE = {
 # Dejar vacío para analizar todos los cuadrantes.
 # Ejemplo: {"Q01", "Q12"} excluye ESTIBADOS y CUIDADO PERSONAL-LIMPIEZA HOGAR.
 # ↓ MODIFICABLE
-CUADRANTES_EXCLUIDOS: set = {"Q01"}
+CUADRANTES_EXCLUIDOS: set = {"Q01","Q17","Q18","Q25"}
 
 # Cantidad mínima de cajas por traslado individual.
 # Transferencias que resulten en menos de este número de cajas enteras se descartan.
 # ↓ MODIFICABLE
 CAJAS_MINIMO_TRASLADO = 1
 
-# Umbral usado en la verificación post-proceso (Filtro 1 — anti sobre-stock combinado):
-# si un destino ya supera este nivel de días gracias a traslados anteriores en la
-# misma corrida, los traslados adicionales hacia ese destino se eliminan.
-# Nota: el umbral del algoritmo principal usa la política nacional por cuadrante;
-# este valor es únicamente para el filtro de verificación.
+# Respaldo para el Filtro 1 (anti sobre-stock combinado) cuando un item no tiene
+# cuadrante mapeado en la política nacional. En el caso normal, el Filtro 1 usa
+# el máximo de días del cuadrante propio del item, no este valor.
 # ↓ MODIFICABLE
 DIAS_MAXIMO_DESTINO = 15
 
@@ -82,7 +80,7 @@ DIAS_MAXIMO_DESTINO = 15
 # el operativo logístico. Si la suma de todas sus cajas es menor a este valor
 # se eliminan todos sus traslados en la verificación final.
 # ↓ MODIFICABLE
-CAJAS_MINIMO_TOTAL_ORIGEN = 5
+CAJAS_MINIMO_TOTAL_ORIGEN = 15
 
 # ===========================================================================
 # FIN DE PARÁMETROS CONFIGURABLES
@@ -93,11 +91,11 @@ INPUT  = BASE / "Input"
 OUTPUT = BASE / "Output"
 OUTPUT.mkdir(exist_ok=True)
 
+hoy = date.today().strftime("%Y%m%d")
+
 
 # ---------------------------------------------------------------------------
-# Helpers de formato Excel
-# Estas funciones aplican estilos visuales a las hojas del archivo de salida.
-# No contienen lógica de negocio.
+# Helpers de formato Excel (sin lógica de negocio)
 # ---------------------------------------------------------------------------
 
 def _apply_header_style(ws):
@@ -118,12 +116,7 @@ def _autofit(ws):
 
 
 def _write_resumen_ejecutivo(ws, df_t, df_excluidos=None, df_resumen_zona=None, df_resumen_cuadrante=None, df_resumen_tienda=None):
-    """
-    Escribe la hoja de Resumen Ejecutivo usando celdas openpyxl directamente
-    (no un DataFrame). Calcula métricas agregadas y las presenta con colores
-    por sección: totales, impacto en origen, impacto en destino, sin solución,
-    top 5 items y top 5 tiendas origen.
-    """
+    """Escribe la hoja Resumen Ejecutivo con celdas openpyxl directas (no DataFrame.to_excel), para controlar colores y layout por sección."""
     from openpyxl.styles import Border, Side, numbers
     from openpyxl.utils import get_column_letter
 
@@ -220,11 +213,11 @@ def _write_resumen_ejecutivo(ws, df_t, df_excluidos=None, df_resumen_zona=None, 
     excl_total      = len(df_excluidos)
     excl_cajas      = int(df_excluidos["Cajas a Trasladar"].sum()) if not df_excluidos.empty else 0
     excl_sobrestock = (
-        int(df_excluidos["Motivo Exclusion"].str.contains("dias por traslados").sum())
+        int((df_excluidos["Filtro"] == "sobrestock_combinado").sum())
         if not df_excluidos.empty else 0
     )
     excl_volumen = (
-        int(df_excluidos["Motivo Exclusion"].str.contains("cajas en total").sum())
+        int((df_excluidos["Filtro"] == "volumen_minimo").sum())
         if not df_excluidos.empty else 0
     )
 
@@ -470,6 +463,13 @@ portafolio.columns = portafolio.columns.str.strip()
 # Política nacional de días de inventario máximos por cuadrante
 politica = pd.read_excel(INPUT / "DB_POLITICA_NACIONAL_DIAS_DE_INVENTARIO_POR_CUADRANTE.xlsx")
 politica.columns = politica.columns.str.strip()
+
+_dias_faltantes = politica.loc[politica["Dias de Inventario Maximos"].isna(), "CUADRANTE"].tolist()
+if _dias_faltantes:
+    raise ValueError(
+        f"DB_POLITICA_NACIONAL: falta 'Dias de Inventario Maximos' para: {_dias_faltantes}"
+    )
+
 dias_max_cuadrante: dict[str, int] = dict(
     zip(politica["CUADRANTE"].str.strip(),
         politica["Dias de Inventario Maximos"].astype(int))
@@ -544,9 +544,6 @@ arr_cuadrante = inv["Cuadrante de Producto"].tolist()
 arr_producto  = inv["Nombre de Producto"].tolist()
 arr_inventario = inv["Inventario Total"].to_numpy()
 
-# Índice (BODEGA, item) → posición en el DataFrame — para actualizar stock_simulado
-inv_idx = {(b, it): i for i, (b, it) in enumerate(zip(arr_bodega, arr_item))}
-
 # Índice item → lista de filas del inventario — para encontrar destinos rápidamente
 dest_por_item: dict[str, list[int]] = {}
 for i, it in enumerate(arr_item):
@@ -558,8 +555,8 @@ for i, it in enumerate(arr_item):
 #
 # Lógica general:
 #   Por cada tienda-producto con exceso de días, busca destinos que necesiten
-#   ese mismo producto, respetando portafolio y restricciones de stock.
-#   Prioriza traslados dentro de la misma zona; si no hay, sugiere otra zona.
+#   ese mismo producto dentro de la misma zona, respetando portafolio y
+#   restricciones de stock.
 #
 # stock_simulado: copia mutable del inventario. Se actualiza después de cada
 #   traslado para que los siguientes cálculos reflejen el estado real acumulado.
@@ -581,6 +578,11 @@ fuentes = inv[
         lambda c: any(str(c).startswith(e) for e in CUADRANTES_EXCLUIDOS)
     ))
 ].copy()
+
+# Procesar primero las tiendas-producto con más días de inventario acumulado:
+# son las de mayor riesgo de merma y deben tener prioridad sobre la capacidad
+# disponible en los destinos.
+fuentes = fuentes.sort_values("Dias Calc", ascending=False)
 
 ya_fue_origen: set[tuple] = set()   # (bodega, item) que ya enviaron en este run
 
@@ -656,7 +658,7 @@ for _idx_prog, src_idx in enumerate(fuente_indices):
         stock_dst_sim = stock_simulado[dst_idx]
 
         necesidad = math.ceil((dias_max_src - dias_dst_antes) * consumo_dst)
-        cajas = math.floor(min(necesidad, disponible))
+        cajas = min(necesidad, disponible)
         cajas_max_dst = math.floor(dias_max_src * consumo_dst - stock_dst_sim)
         cajas = min(cajas, cajas_max_dst)
 
@@ -716,10 +718,11 @@ if not df_traslados.empty:
 # VERIFICACIÓN — Sobre-stock combinado en destinos y eficiencia de origen
 #
 # Filtro 1 — Sobre-stock combinado:
-#   Si un destino ya alcanzó DIAS_MAXIMO_DESTINO gracias a un traslado previo
-#   en la misma corrida, cualquier traslado posterior a ese mismo (Item, Destino)
-#   se elimina. El primer traslado siempre se acepta aunque redondee levemente
-#   por encima del umbral.
+#   Si un destino ya alcanzó el máximo de días de SU cuadrante gracias a un
+#   traslado previo en la misma corrida, cualquier traslado posterior a ese
+#   mismo (Item, Destino) se elimina. El primer traslado siempre se acepta
+#   aunque redondee levemente por encima del umbral. DIAS_MAXIMO_DESTINO solo
+#   se usa como respaldo si el item no tiene cuadrante mapeado en la política.
 #
 # Filtro 2 — Volumen mínimo por origen:
 #   Si la suma de todas las cajas que envía una tienda origen es menor a
@@ -744,16 +747,19 @@ if not df_traslados.empty:
 
         consumo_dst     = df_traslados.loc[indices[0], "Consumo Diario Destino"]
         stock_corriente = df_traslados.loc[indices[0], "Stock Actual Destino"]
+        cuadrante_grupo = df_traslados.loc[indices[0], "Cuadrante"]
+        limite_grupo    = dias_max_cuadrante.get(cuadrante_grupo, DIAS_MAXIMO_DESTINO)
 
         for n, i in enumerate(indices):
             cajas         = df_traslados.loc[i, "Cajas a Trasladar"]
             dias_actuales = stock_corriente / consumo_dst if consumo_dst > 0 else 0
 
-            if n > 0 and dias_actuales >= DIAS_MAXIMO_DESTINO:
+            if n > 0 and dias_actuales >= limite_grupo:
                 row_dict = df_traslados.loc[i].to_dict()
+                row_dict["Filtro"] = "sobrestock_combinado"
                 row_dict["Motivo Exclusion"] = (
                     f"Destino ya tiene {round(dias_actuales, 1)} dias por traslados "
-                    f"previos (limite: {DIAS_MAXIMO_DESTINO})"
+                    f"previos (limite: {limite_grupo})"
                 )
                 excluidos_verificacion.append(row_dict)
                 indices_eliminar.append(i)
@@ -762,31 +768,31 @@ if not df_traslados.empty:
 
     df_traslados = df_traslados.drop(index=indices_eliminar).reset_index(drop=True)
 
-    # ── Filtro 2: volumen insuficiente en origen, evaluado por tipo ─────────
-    # Misma Zona y Sugerencia Otra Zona se evalúan independientemente.
-    # Si un origen no llega a CAJAS_MINIMO_TOTAL_ORIGEN en un tipo dado,
-    # se eliminan sus traslados de ese tipo (aunque pase el mínimo en el otro).
+    # ── Filtro 2: volumen insuficiente en origen ─────────────────────────────
+    # Si un origen no llega a CAJAS_MINIMO_TOTAL_ORIGEN en total, se eliminan
+    # todos sus traslados.
     if not df_traslados.empty:
         totales = (
-            df_traslados.groupby(["Bodega Origen", "Tipo"])["Cajas a Trasladar"]
+            df_traslados.groupby("Bodega Origen")["Cajas a Trasladar"]
             .sum()
             .reset_index()
-            .rename(columns={"Cajas a Trasladar": "_total_tipo"})
+            .rename(columns={"Cajas a Trasladar": "_total_origen"})
         )
-        df_merged  = df_traslados.merge(totales, on=["Bodega Origen", "Tipo"])
-        mask_insuf = df_merged["_total_tipo"] < CAJAS_MINIMO_TOTAL_ORIGEN
+        df_merged  = df_traslados.merge(totales, on="Bodega Origen")
+        mask_insuf = df_merged["_total_origen"] < CAJAS_MINIMO_TOTAL_ORIGEN
 
         if mask_insuf.any():
             for _, row in df_merged[mask_insuf].iterrows():
-                row_dict = {k: v for k, v in row.items() if k != "_total_tipo"}
+                row_dict = {k: v for k, v in row.items() if k != "_total_origen"}
+                row_dict["Filtro"] = "volumen_minimo"
                 row_dict["Motivo Exclusion"] = (
-                    f"Origen envia solo {int(row['_total_tipo'])} cajas "
-                    f"({row['Tipo']}) — minimo requerido: {CAJAS_MINIMO_TOTAL_ORIGEN}"
+                    f"Origen envia solo {int(row['_total_origen'])} cajas en total "
+                    f"— minimo requerido: {CAJAS_MINIMO_TOTAL_ORIGEN}"
                 )
                 excluidos_verificacion.append(row_dict)
             df_traslados = (
                 df_merged[~mask_insuf]
-                .drop(columns=["_total_tipo"])
+                .drop(columns=["_total_origen"])
                 .reset_index(drop=True)
             )
 
@@ -866,7 +872,6 @@ else:
 # ---------------------------------------------------------------------------
 
 print("\nGenerando archivo Excel de salida...")
-hoy      = date.today().strftime("%Y%m%d")
 out_path = OUTPUT / f"Plan_Traslados_{hoy}.xlsx"
 
 # Orden de columnas en las hojas de traslados:
