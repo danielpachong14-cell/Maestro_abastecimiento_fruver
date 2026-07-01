@@ -175,6 +175,7 @@ def _write_resumen_ejecutivo(ws, df_t, df_excluidos=None, df_resumen_zona=None, 
     # ── Calcular métricas para el resumen ────────────────────────────────────
     if not df_t.empty:
         tot_traslados   = len(df_t)
+        traslados_globales = df_t.groupby(["Bodega Origen", "Bodega Destino"]).ngroups
         tot_cajas       = int(df_t["Cajas a Trasladar"].sum())
         tiendas_origen  = df_t["Bodega Origen"].nunique()
         tiendas_destino = df_t["Bodega Destino"].nunique()
@@ -202,7 +203,7 @@ def _write_resumen_ejecutivo(ws, df_t, df_excluidos=None, df_resumen_zona=None, 
             .head(5)
         )
     else:
-        tot_traslados = tot_cajas = 0
+        tot_traslados = traslados_globales = tot_cajas = 0
         tiendas_origen = tiendas_destino = zonas_total = items_unicos = 0
         avg_dias_orig_antes = avg_dias_orig_desp = 0
         avg_dias_dest_antes = avg_dias_dest_desp = 0
@@ -228,7 +229,8 @@ def _write_resumen_ejecutivo(ws, df_t, df_excluidos=None, df_resumen_zona=None, 
     r += 1; _blank(r)
 
     r += 1; _merge_title(r, "TOTALES GENERALES", C_SECCION, F_SEC)
-    r += 1; _row(r, "Total traslados planificados",  tot_traslados, "", "")
+    r += 1; _row(r, "Líneas de traslado (item×origen×destino)",  tot_traslados, "", "")
+    r += 1; _row(r, "Traslados globales (rutas origen→destino)", traslados_globales, "", "")
     r += 1; _row(r, "Total cajas a trasladar",       tot_cajas,  "", "")
     r += 1; _row(r, "Items únicos involucrados",         items_unicos, "", "")
     r += 1; _row(r, "Tiendas que envían (origen)",       tiendas_origen,  "", "")
@@ -341,10 +343,11 @@ def _write_resumen_ejecutivo(ws, df_t, df_excluidos=None, df_resumen_zona=None, 
     # ── Resumen por Zona ─────────────────────────────────────────────────────
     if df_resumen_zona is not None and not df_resumen_zona.empty:
         ws.column_dimensions["E"].width = 22
+        ws.column_dimensions["F"].width = 22
 
         r += 1; _blank(r)
         r += 1
-        ws.merge_cells(f"A{r}:E{r}")
+        ws.merge_cells(f"A{r}:F{r}")
         cell = ws[f"A{r}"]
         cell.value = "RESUMEN POR ZONA"
         cell.fill = C_SECCION
@@ -355,10 +358,10 @@ def _write_resumen_ejecutivo(ws, df_t, df_excluidos=None, df_resumen_zona=None, 
         r += 1
         encabezados_zona = [
             "Zona", "Traslados Realizados", "Cajas Enviadas",
-            "Traslados Recibidos", "Cajas Recibidas",
+            "Traslados Recibidos", "Cajas Recibidas", "Traslados Globales (rutas)",
         ]
         for ci, h in enumerate(encabezados_zona):
-            col_letra = ["A", "B", "C", "D", "E"][ci]
+            col_letra = ["A", "B", "C", "D", "E", "F"][ci]
             c = ws[f"{col_letra}{r}"]
             c.value = h
             c.fill = C_SECCION
@@ -369,12 +372,12 @@ def _write_resumen_ejecutivo(ws, df_t, df_excluidos=None, df_resumen_zona=None, 
 
         col_keys = [
             "Zona", "Traslados_Realizados", "Cajas_Enviadas",
-            "Traslados_Recibidos", "Cajas_Recibidas",
+            "Traslados_Recibidos", "Cajas_Recibidas", "Traslados_Globales",
         ]
         for _, fila in df_resumen_zona.sort_values("Zona").iterrows():
             r += 1
             for ci, key in enumerate(col_keys):
-                col_letra = ["A", "B", "C", "D", "E"][ci]
+                col_letra = ["A", "B", "C", "D", "E", "F"][ci]
                 c = ws[f"{col_letra}{r}"]
                 c.value = fila[key]
                 c.fill = C_LABEL if ci == 0 else C_VALOR
@@ -817,6 +820,16 @@ if not df_traslados.empty:
     )
     for col in ["Traslados_Realizados", "Cajas_Enviadas", "Traslados_Recibidos", "Cajas_Recibidas"]:
         resumen[col] = resumen[col].astype(int)
+
+    # Traslados globales por zona: rutas Bodega Origen → Bodega Destino distintas,
+    # sin importar cuántos items (líneas) viajen en cada una.
+    rutas_zona = (
+        df_traslados.drop_duplicates(["Bodega Origen", "Bodega Destino"])
+        .groupby("Zona Origen").size()
+        .rename_axis("Zona").reset_index(name="Traslados_Globales")
+    )
+    resumen = resumen.merge(rutas_zona, on="Zona", how="left").fillna(0)
+    resumen["Traslados_Globales"] = resumen["Traslados_Globales"].astype(int)
 else:
     resumen = pd.DataFrame()
 
