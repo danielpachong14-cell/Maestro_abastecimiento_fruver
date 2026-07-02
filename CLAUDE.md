@@ -45,11 +45,11 @@ Distribucion de Fruver/
 ## Arquitectura del pipeline
 
 ```
-5 Excel (UploadedFile o file objects)
+6 Excel obligatorios + 1 opcional (UploadedFile o file objects)
   → loader.py       valida columnas requeridas por archivo
-  → preprocessor.py normaliza claves, merge → DataFrame tienda × ítem
-  → algorithm.py    distribuye en 2 fases con prioridades → (df_output, alertas)
-  → exporter.py     genera bytes del Excel final (3 hojas)
+  → preprocessor.py normaliza claves, merge → (df_merged, alertas de calidad de datos)
+  → algorithm.py    distribuye en 3 fases con prioridades → (df_output, alertas)
+  → exporter.py     genera bytes del Excel final (6 hojas, incluida Alertas)
 ```
 
 Todo el procesamiento ocurre en memoria. Ningún módulo del paquete escribe a disco; solo `run.py` y el botón de descarga de `app.py` persisten archivos.
@@ -58,11 +58,18 @@ Todo el procesamiento ocurre en memoria. Ningún módulo del paquete escribe a d
 
 El CLAUDE.md interno documenta exhaustivamente:
 
-- **Normalización de claves de cruce** (CRÍTICO para que los merges funcionen): prefijo `BO` en tiendas, texto vs entero en ítems, fila `'Gran total'` a eliminar.
-- **Parámetros del algoritmo**: `TARGET_DAYS`, `MIN_STOCK_AGOTADO`, `MIN_STOCK_SAFETY`, `MIN_CAJAS_INICIAL`.
+- **Normalización de claves de cruce** (CRÍTICO para que los merges funcionen): prefijo `BO` en tiendas, texto vs entero en ítems, fila totalizadora a eliminar, comparación exacta (no `contains`) de estado activo.
+- **Parámetros del algoritmo**: `TARGET_DAYS`, `MIN_STOCK_AGOTADO`, `MIN_STOCK_SAFETY`, `MIN_CAJAS_INICIAL`, `MAX_CAJAS_POR_ITEM`, `TOPE_EXCEDENTE`.
 - **Lógica de prioridades y distribución del sobrante** (por qué el órden de tiendas importa).
-- **Reglas no negociables**: cero residuo, solo cajas completas, no escribir a disco.
+- **Grupos de productos espejo** y validación cruzada con Portafolio Fruver.
+- **Reglas no negociables**: cero residuo, solo cajas completas, no escribir a disco, alertas visibles y persistidas.
 
-## Contradicción conocida entre docs
+## Resuelto: contradicción sobre "Aplica para Distribución Automática?"
 
-`distribuidor-fruver/CLAUDE.md` dice que el campo `Aplica para DistribuciónAutomática?` **se ignora** (se distribuye a todas las tiendas en Celes para ese ítem). `README.md` dice que solo se distribuye a tiendas con ese campo en `SI`. El CLAUDE.md es la fuente autoritativa — verificar contra `core/preprocessor.py` antes de cambiar la lógica.
+Hasta la auditoría técnica de 2026-07, `distribuidor-fruver/README.md` afirmaba que
+solo se distribuía a tiendas con `Aplica para DistribuciónAutomática? = SI`, mientras
+que `distribuidor-fruver/CLAUDE.md` decía que el campo se ignora. Se verificó contra
+`core/preprocessor.py` y contra datos reales (96.6% de las filas de Celes tenían `NO`
+en ese campo): **el código lo ignora por completo** — ni siquiera está entre las
+columnas que `loader.py` exige de Celes. El README ya se corrigió; si vuelve a
+aparecer una discrepancia de este tipo, `core/preprocessor.py` es la fuente de verdad.

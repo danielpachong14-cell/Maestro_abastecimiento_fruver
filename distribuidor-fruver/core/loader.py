@@ -10,7 +10,8 @@ import pandas as pd
 # ejecución con un mensaje claro (regla no negociable: no proceder con datos
 # incompletos).
 REQUIRED_COLUMNS = {
-    'stock': ['Item', 'Desc. item', 'Cant. disponible', 'Factor U.M.', 'U.M.'],
+    'stock': ['Item', 'Desc. item', 'Cant. disponible', 'Factor U.M.', 'U.M.',
+              'ESTADO DEL PRODUCTO'],
     'celes': ['Código de Bodega', 'Nombre de Bodega', 'Código de Producto',
               'Consumo Diario (Unidades de Distribución)',
               '(=) Días de Inventario Actuales',

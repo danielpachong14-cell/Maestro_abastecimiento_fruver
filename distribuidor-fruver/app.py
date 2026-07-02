@@ -43,11 +43,19 @@ if submitted:
     with st.spinner("Procesando..."):
         try:
             dfs = load_files(stock_file, celes_file, portafolio_file, tiendas_file, tiendas_item_file, espejo_file, excluidas_file)
-            df_merged = build_distribution_df(dfs)
-            df_output, alertas = run_distribution(df_merged)
+            df_merged, alertas_preproc = build_distribution_df(dfs)
+            df_output, alertas = run_distribution(df_merged, alertas_extra=alertas_preproc)
             excel_bytes = generate_excel(df_output, alertas, df_merged)
         except ValueError as e:
             st.error(str(e))
+            st.stop()
+        except Exception as e:
+            st.error(
+                "Ocurrió un error inesperado procesando los archivos. Revisa que los "
+                "Excel tengan el formato esperado (hojas y columnas) e inténtalo de nuevo."
+            )
+            with st.expander("Detalle técnico"):
+                st.exception(e)
             st.stop()
 
     total_cajas  = int(df_output["cajas_asignadas"].sum()) if len(df_output) else 0

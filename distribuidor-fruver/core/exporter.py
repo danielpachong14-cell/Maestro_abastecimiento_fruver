@@ -4,22 +4,22 @@ Hojas:
   - Distribución:        el pedido por tienda-ítem (lo que se ejecuta).
   - Resumen:             totales de cajas por tienda.
   - Resumen Ítems:       totales y desglose por fase de distribución, agrupado por ítem.
-  - Alertas:             casos borde detectados durante el procesamiento.
-  - Riesgo Merma:        tiendas-ítem donde los días proyectados post-pedido superan
-                         el umbral min(10, vida_útil); incluye cantidades en cajas.
   - Análisis Comprador:  por ítem, compara cajas disponibles en CEDI contra el mínimo
                          necesario para cubrir TARGET_DAYS en todas las tiendas, y
                          clasifica el nivel de riesgo para orientar la decisión de compra.
+  - Alertas:              casos borde detectados durante el procesamiento (ítems sin
+                         distribuir, combinaciones sin match en Celes, validación
+                         cruzada con Portafolio, etc.). "OK — Sin alertas" si no hubo.
 """
 
 import io
-import math
 
+import numpy as np
 import pandas as pd
 from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from .algorithm import TARGET_DAYS, TOPE_EXCEDENTE
+from .algorithm import MIN_CAJAS_INICIAL, TARGET_DAYS, TOPE_EXCEDENTE
 
 HEADER_FILL = PatternFill("solid", fgColor="2D6A4F")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
@@ -40,6 +40,9 @@ _TOPE_DESCRIPCION = (
     'quedarían acumuladas en tienda por encima de ese límite.\n\n'
     'Verde = 0% · Amarillo = bajo (>0%) · Naranja = medio (≥20%) · Rojo = alto (≥50%).'
 )
+
+# Alertas ordenadas por severidad al escribir la hoja "Alertas".
+_ORDEN_TIPO_ALERTA = {'CRÍTICO': 0, 'ERROR': 0, 'ADVERTENCIA': 1}
 
 
 def _style_header(ws):
@@ -79,6 +82,26 @@ def _resaltar_tope_excedente(ws, comprador_out):
     ws.cell(row=1, column=col_pct).comment = comentario
 
 
+def _build_alertas_sheet(alertas):
+    """Arma el DataFrame de la hoja "Alertas". Los dicts de alerta traen
+    claves heterogéneas según el tipo (`cajas_sin_distribuir`,
+    `combos_sin_match`, `tiendas_sin_consumo`, ...) — `pd.DataFrame(alertas)`
+    ya rellena con NaN las que falten por fila; solo se reordenan las
+    columnas núcleo (Tipo/Ítem/Mensaje) primero y se ordenan por severidad."""
+    if not alertas:
+        return pd.DataFrame([{'Tipo': 'OK', 'Ítem': '-', 'Mensaje': 'Sin alertas'}])
+
+    alertas_out = pd.DataFrame(alertas)
+    alertas_out['_orden'] = alertas_out['tipo'].map(_ORDEN_TIPO_ALERTA).fillna(2)
+    alertas_out = alertas_out.sort_values('_orden', kind='stable').drop(columns=['_orden'])
+
+    core_cols = ['tipo', 'item', 'mensaje']
+    extra_cols = [c for c in alertas_out.columns if c not in core_cols]
+    alertas_out = alertas_out[core_cols + extra_cols].reset_index(drop=True)
+    alertas_out.columns = ['Tipo', 'Ítem', 'Mensaje'] + [c.replace('_', ' ').title() for c in extra_cols]
+    return alertas_out
+
+
 def generate_excel(df_output, alertas=None, df_merged=None):
     """Genera el archivo Excel de distribución y lo retorna como bytes.
 
@@ -91,15 +114,19 @@ def generate_excel(df_output, alertas=None, df_merged=None):
     # Pre-computar columnas derivadas una sola vez para reutilizar en todas las hojas.
     if has_data:
         d = df_output.copy()
-        for col in ('cajas_fase1', 'cajas_fase2a', 'cajas_fase2b', 'vida_util'):
+        for col in ('cajas_fase1', 'cajas_fase2', 'cajas_fase3', 'vida_util'):
             if col not in d.columns:
                 d[col] = 0
         d['_stock_despues'] = d['inventario_efectivo'] + d['cajas_asignadas']
-        d['_dias_despues'] = d.apply(
-            lambda r: round(r['_stock_despues'] / r['consumo_diario'], 1)
-            if r['consumo_diario'] > 0 else None,
-            axis=1,
+        d['_dias_despues'] = np.where(
+            d['consumo_diario'] > 0,
+            (d['_stock_despues'] / d['consumo_diario']).round(1),
+            np.nan,
         )
+        # Umbral de riesgo de merma: min(10, vida_util) si vida_util > 0; si no, 10.
+        # Se usa en "Análisis Comprador" para las estadísticas de riesgo por ítem.
+        vida_util_num = pd.to_numeric(d['vida_util'], errors='coerce')
+        d['_umbral'] = np.where(vida_util_num > 0, vida_util_num.clip(upper=10.0), 10.0)
     else:
         d = None
 
@@ -121,7 +148,10 @@ def generate_excel(df_output, alertas=None, df_merged=None):
             'UM':                              d['um'],
             'Consumo Diario':                  d['consumo_diario'].round(2),
             'Stock Antes Pedido':              d['inventario_efectivo'].round(2),
-            'Días Inventario Actual':          d['dias_proyectados'].round(1),
+            # dias_proyectados puede ser inf (consumo_diario==0 antes del pedido) —
+            # se sanitiza a NaN (celda vacía) igual que la columna hermana de abajo,
+            # en vez de escribir el string literal 'inf' en el Excel.
+            'Días Inventario Actual':          d['dias_proyectados'].replace([np.inf, -np.inf], np.nan).round(1),
             'Pedido Final':                    d['cajas_asignadas'].astype(int),
             'Stock Después Pedido':            d['_stock_despues'].round(2),
             'Días Inventario Proyectado':      d['_dias_despues'],
@@ -150,79 +180,24 @@ def generate_excel(df_output, alertas=None, df_merged=None):
                 item_desc=('item_desc', 'first'),
                 total_cajas=('cajas_asignadas', 'sum'),
                 fase1=('cajas_fase1', 'sum'),
-                fase2a=('cajas_fase2a', 'sum'),
-                fase2b=('cajas_fase2b', 'sum'),
+                fase2=('cajas_fase2', 'sum'),
+                fase3=('cajas_fase3', 'sum'),
             )
             .rename(columns={
                 'item_code':   'Código Ítem',
                 'item_desc':   'Nombre Ítem',
                 'total_cajas': 'Total Cajas',
                 'fase1':       'Cajas Fase 1',
-                'fase2a':      'Cajas Fase 2a',
-                'fase2b':      'Cajas Fase 2b',
+                'fase2':       'Cajas Fase 2',
+                'fase3':       'Cajas Fase 3',
             })
             .sort_values('Código Ítem')
         )
     else:
         resumitem_df = pd.DataFrame(columns=[
             'Código Ítem', 'Nombre Ítem', 'Total Cajas',
-            'Cajas Fase 1', 'Cajas Fase 2a', 'Cajas Fase 2b',
+            'Cajas Fase 1', 'Cajas Fase 2', 'Cajas Fase 3',
         ])
-
-    # ── Hoja Riesgo Merma ──────────────────────────────────────────────────────
-    _MERMA_COLS = [
-        'Zona', 'Centro Operacional de la Bodega', 'Nombre Tienda',
-        'Código Ítem', 'Nombre Ítem',
-        'Consumo Diario', 'Vida Útil (días)', 'Umbral Merma (días)',
-        'Stock Antes Pedido (Cj)', 'Pedido (Cj)', 'Stock Post-Pedido (Cj)',
-        'Días Proy. Post-Pedido', 'Exceso (días)', 'Cajas en Exceso (est.)',
-    ]
-    if has_data:
-        # Umbral: min(10, vida_util) si vida_util > 0; si no, 10.
-        d['_umbral'] = d['vida_util'].apply(
-            lambda v: min(10.0, float(v)) if pd.notna(v) and float(v) > 0 else 10.0
-        )
-        # Incluye filas con dias_despues > umbral Y filas con consumo=0 que reciben cajas
-        # (inventario infinito = riesgo seguro de merma).
-        is_riesgo = (
-            (d['_dias_despues'].notna() & (d['_dias_despues'] > d['_umbral']))
-            | (d['_dias_despues'].isna() & (d['cajas_asignadas'] > 0))
-        )
-        merma_rows = d[is_riesgo].copy()
-        if len(merma_rows) > 0:
-            merma_rows['_exceso'] = (merma_rows['_dias_despues'] - merma_rows['_umbral']).round(1)
-            # Cajas en exceso estimadas: exceso_días × consumo_diario.
-            # Para consumo=0, todas las cajas asignadas son exceso (no se venderán).
-            merma_rows['_cajas_exceso_est'] = merma_rows.apply(
-                lambda r: (
-                    round(max(0.0, r['_exceso'] * r['consumo_diario']), 1)
-                    if pd.notna(r['_exceso']) and r['consumo_diario'] > 0
-                    else float(r['cajas_asignadas'])
-                ),
-                axis=1,
-            )
-            merma_out = pd.DataFrame({
-                'Zona':                            merma_rows['zona'],
-                'Centro Operacional de la Bodega': merma_rows['store_code'],
-                'Nombre Tienda':                   merma_rows['store_name'],
-                'Código Ítem':                     merma_rows['item_code'],
-                'Nombre Ítem':                     merma_rows['item_desc'],
-                'Consumo Diario':                  merma_rows['consumo_diario'].round(2),
-                'Vida Útil (días)':                merma_rows['vida_util'].fillna(0).astype(int),
-                'Umbral Merma (días)':             merma_rows['_umbral'],
-                'Stock Antes Pedido (Cj)':         merma_rows['inventario_efectivo'].round(2),
-                'Pedido (Cj)':                     merma_rows['cajas_asignadas'].astype(int),
-                'Stock Post-Pedido (Cj)':          merma_rows['_stock_despues'].round(2),
-                'Días Proy. Post-Pedido':          merma_rows['_dias_despues'],
-                'Exceso (días)':                   merma_rows['_exceso'],
-                'Cajas en Exceso (est.)':          merma_rows['_cajas_exceso_est'],
-            }).sort_values('Exceso (días)', ascending=False, na_position='first')
-        else:
-            merma_out = pd.DataFrame(
-                [dict.fromkeys(_MERMA_COLS, None) | {'Nombre Ítem': 'Sin riesgo de merma detectado'}]
-            )
-    else:
-        merma_out = pd.DataFrame(columns=_MERMA_COLS)
 
     # ── Hoja Análisis Comprador ────────────────────────────────────────────────
     # Compara las cajas disponibles en CEDI contra el mínimo para cubrir TARGET_DAYS
@@ -238,11 +213,8 @@ def generate_excel(df_output, alertas=None, df_merged=None):
     if has_data and df_merged is not None:
         mn = df_merged.copy()
         # Cajas mínimas que cada tienda necesita para alcanzar TARGET_DAYS de cobertura.
-        mn['_need'] = mn.apply(
-            lambda r: max(0, math.ceil(TARGET_DAYS * r.consumo_diario - r.inventario_efectivo))
-            if r.consumo_diario > 0 else 0,
-            axis=1,
-        )
+        necesidad_min = (TARGET_DAYS * mn['consumo_diario'] - mn['inventario_efectivo']).clip(lower=0)
+        mn['_need'] = np.where(mn['consumo_diario'] > 0, np.ceil(necesidad_min), 0).astype(int)
         item_base = mn.groupby('item_code', as_index=False).agg(
             item_desc       =('item_desc',              'first'),
             cajas_cedi      =('cajas_disponibles_cedi', 'first'),
@@ -252,10 +224,10 @@ def generate_excel(df_output, alertas=None, df_merged=None):
         item_base['exceso_cedi'] = (
             item_base['cajas_cedi'] - item_base['cajas_min_3dias']
         ).clip(lower=0)
-        item_base['pct_reduccion'] = item_base.apply(
-            lambda r: round(r['exceso_cedi'] / r['cajas_cedi'] * 100, 1)
-            if r['cajas_cedi'] > 0 else 0.0,
-            axis=1,
+        item_base['pct_reduccion'] = np.where(
+            item_base['cajas_cedi'] > 0,
+            (item_base['exceso_cedi'] / item_base['cajas_cedi'] * 100).round(1),
+            0.0,
         )
 
         # Estadísticas de merma por ítem (d['_umbral'] ya fue calculado en la sección anterior).
@@ -264,11 +236,10 @@ def generate_excel(df_output, alertas=None, df_merged=None):
             | (d['_dias_despues'].isna() & (d['cajas_asignadas'] > 0))
         ).astype(int)
         # Cajas en exceso por fila: para consumo=0 todas las cajas asignadas son exceso.
-        d['_exceso_cajas_item'] = d.apply(
-            lambda r: max(0.0, (r['_dias_despues'] - r['_umbral']) * r['consumo_diario'])
-            if pd.notna(r['_dias_despues']) and r['consumo_diario'] > 0
-            else float(r['cajas_asignadas']),
-            axis=1,
+        d['_exceso_cajas_item'] = np.where(
+            d['_dias_despues'].notna() & (d['consumo_diario'] > 0),
+            ((d['_dias_despues'] - d['_umbral']) * d['consumo_diario']).clip(lower=0),
+            d['cajas_asignadas'].astype(float),
         )
         # Mismo chequeo que _is_merma, pero contra TOPE_EXCEDENTE (días) en vez del
         # umbral por vida útil — identifica tiendas-ítem que quedan por encima del
@@ -343,33 +314,37 @@ def generate_excel(df_output, alertas=None, df_merged=None):
     else:
         comprador_out = None
 
+    # ── Hoja Alertas ───────────────────────────────────────────────────────────
+    alertas_out = _build_alertas_sheet(alertas)
+
     # ── Escritura ──────────────────────────────────────────────────────────────
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         dist_df.to_excel(writer, index=False, sheet_name='Distribución')
         resumen_df.to_excel(writer, index=False, sheet_name='Resumen')
         resumitem_df.to_excel(writer, index=False, sheet_name='Resumen Ítems', startrow=4)
-        merma_out.to_excel(writer, index=False, sheet_name='Riesgo Merma')
         if comprador_out is not None:
             comprador_out.to_excel(writer, index=False, sheet_name='Análisis Comprador')
+        alertas_out.to_excel(writer, index=False, sheet_name='Alertas')
 
         # Notas de fases en las primeras filas de "Resumen Ítems".
         _notas = [
             'Fase 1 — Urgentes: cubre tiendas AGOTADAS y en STOCK DE SEGURIDAD con cap '
-            'creciente por rondas (máx. 2 cajas/ronda). Todas reciben su 1.ª caja antes '
-            'de que alguna reciba su 2.ª.',
-            'Fase 2a — Proporcional: completa hasta 3 días de inventario. Si el stock no '
-            'alcanza para todos, la escasez se reparte de forma proporcional '
+            f'creciente por rondas (máx. {MIN_CAJAS_INICIAL} cajas/ronda). Todas reciben su 1.ª '
+            'caja antes de que alguna reciba su 2.ª.',
+            f'Fase 2 — Proporcional: completa hasta {TARGET_DAYS:g} días de inventario. Si el '
+            'stock no alcanza para todos, la escasez se reparte de forma proporcional '
             '(corrección Hamilton para residuos enteros).',
-            'Fase 2b — Excedente: el sobrante se distribuye por rondas a las tiendas con '
-            'menos cajas acumuladas (consumo > 0, tope 5 días). Evita que las tiendas de '
-            'mayor consumo acaparen el excedente.',
+            f'Fase 3 — Excedente: el sobrante se distribuye por rondas proporcional a '
+            f'consumo_diario / días_actuales entre tiendas elegibles (consumo > 0, tope '
+            f'{TOPE_EXCEDENTE} días). Las tiendas más atrasadas en días ganan más excedente, '
+            'cerrando la brecha en vez de mantenerla.',
         ]
         ws_ri = writer.sheets['Resumen Ítems']
         for i, nota in enumerate(_notas, start=1):
             ws_ri.cell(row=i, column=1, value=nota)
 
-        for sheet in ('Distribución', 'Resumen', 'Riesgo Merma'):
+        for sheet in ('Distribución', 'Resumen', 'Alertas'):
             ws = writer.sheets[sheet]
             _style_header(ws)
             _autofit(ws)

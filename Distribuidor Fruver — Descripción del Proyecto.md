@@ -4,7 +4,7 @@
 
 El **Distribuidor Fruver** es una herramienta interna desarrollada por Isimo que automatiza la distribución del inventario de productos Fruver desde el CEDI hacia las tiendas activas de la cadena.
 
-Funciona como una aplicación web liviana: el operador sube cinco archivos Excel, presiona un botón y en segundos descarga el archivo de pedidos listo para ejecutarse en el sistema, con el 100% del inventario disponible repartido entre las tiendas.
+Funciona como una aplicación web liviana: el operador sube seis archivos Excel (y un séptimo opcional), presiona un botón y en segundos descarga el archivo de pedidos listo para ejecutarse en el sistema, con el 100% del inventario disponible repartido entre las tiendas.
 
 ---
 
@@ -12,26 +12,28 @@ Funciona como una aplicación web liviana: el operador sube cinco archivos Excel
 
 ### Entradas
 
-La herramienta recibe cinco archivos Excel que ya existen en los procesos del negocio:
+La herramienta recibe seis archivos Excel obligatorios (más uno opcional) que ya existen en los procesos del negocio:
 
 | Archivo | Contenido |
 |---|---|
 | **Stock CEDI (Siesa)** | Inventario disponible en el CEDI por ítem (en cajas) |
 | **Celes** | Consumos históricos, existencias en tienda e inventario en tránsito |
-| **Portafolio Fruver** | Clasificación de tipo de portafolio por ítem |
+| **Portafolio Fruver** | Catálogo de ítems, usado para alertar ítems nuevos sin catalogar o descontinuados con existencia |
 | **Base de Tiendas** | Maestro de tiendas activas con sus códigos |
 | **Tiendas × Ítem** | Matriz de elegibilidad: qué tiendas pueden recibir qué ítem |
+| **Productos Espejo** | Agrupa SKUs que son el mismo producto físico bajo distinto código, para no duplicar reposición entre ellos |
+| **Tiendas sin pedido** *(opcional)* | Tiendas a excluir de una corrida puntual |
 
 ### Proceso interno
 
 ```
-5 Excel → carga y validación → normalización → algoritmo de distribución → archivo de pedidos
+6+1 Excel → carga y validación → normalización → algoritmo de distribución → archivo de pedidos
 ```
 
 1. **Carga y validación** — verifica que cada archivo tenga las columnas requeridas y alerta si falta algo antes de procesar.
-2. **Normalización** — resuelve automáticamente las diferencias de codificación entre los archivos (ej. el stock usa `'0000155'` como texto, mientras los otros usan `155` como número; Celes usa `BOS03` mientras la base de tiendas usa `S03`).
+2. **Normalización** — resuelve automáticamente las diferencias de codificación entre los archivos (ej. el stock usa `'0000155'` como texto, mientras los otros usan `155` como número; Celes usa `BOS03` mientras la base de tiendas usa `S03`; los estados tipo `'001 - ACTIVO'` se comparan exactos, no por contención de texto).
 3. **Distribución** — el motor asigna las cajas disponibles priorizando las tiendas con mayor urgencia y garantizando que el inventario del CEDI quede en cero.
-4. **Exportación** — genera el Excel de salida con tres hojas: Distribución, Resumen y Alertas.
+4. **Exportación** — genera el Excel de salida con cinco hojas: Distribución, Resumen, Resumen Ítems, Análisis Comprador y Alertas.
 
 ### Lógica de prioridades
 
@@ -40,7 +42,7 @@ Cada tienda recibe cajas según su nivel de urgencia:
 | Prioridad | Condición | Acción |
 |---|---|---|
 | **AGOTADA** | Inventario efectivo < 0.3 cajas | Recibe primero, mínimo 1 caja |
-| **STOCK DE SEGURIDAD** | Inventario efectivo < 0.5 cajas | Segunda en recibir, mínimo 1 caja |
+| **STOCK DE SEGURIDAD** | Inventario efectivo < 0.6 cajas | Segunda en recibir, mínimo 1 caja |
 | **REPOSICIÓN** | Menos de 3 días de inventario proyectado | Recibe cajas para llegar al objetivo |
 | **CUBIERTA** | 3 o más días de inventario proyectado | Solo recibe si queda sobrante |
 
@@ -52,7 +54,9 @@ El algoritmo tiene una regla no negociable: **la suma de cajas asignadas a todas
 
 ### Archivo de salida
 
-`distribucion_fruver_YYYYMMDD.xlsx` con las columnas:
+`distribucion_fruver_YYYYMMDD.xlsx`, hoja principal **Distribución** (columnas
+más relevantes; hay más columnas de contexto como Nombre Tienda, Zona, Consumo
+Diario y días de inventario antes/después):
 
 | Columna | Contenido |
 |---|---|
@@ -60,6 +64,9 @@ El algoritmo tiene una regla no negociable: **la suma de cajas asignadas a todas
 | Código de Producto | Código del ítem |
 | UM | Unidad de medida (referencia) |
 | Pedido Final | Cajas completas a enviar (siempre entero) |
+
+El archivo trae además las hojas Resumen, Resumen Ítems, Análisis Comprador y
+Alertas — ver detalle en `Resumen_Sistema_Distribuidor_Fruver.md`.
 
 ---
 
@@ -73,7 +80,7 @@ El algoritmo tiene una regla no negociable: **la suma de cajas asignadas a todas
 | Errores de cruce de datos | Frecuentes (códigos distintos entre archivos) | Eliminados (normalización automática) |
 | Criterio de distribución | Subjetivo / basado en experiencia individual | Algoritmo reproducible con reglas documentadas |
 | Garantía de 0 residuo | Manual, propenso a errores | Garantizado matemáticamente |
-| Trazabilidad | Baja (depende del archivo de cada persona) | Alta (hojas Resumen y Alertas auditables) |
+| Trazabilidad | Baja (depende del archivo de cada persona) | Alta (hojas Resumen, Resumen Ítems y Alertas auditables) |
 | Riesgo operativo | Alto (depende de una persona) | Bajo (cualquier operador puede ejecutarlo) |
 
 ### Detalle de mejoras
@@ -82,7 +89,7 @@ El algoritmo tiene una regla no negociable: **la suma de cajas asignadas a todas
 El proceso manual requiere abrir múltiples archivos, hacer cruces con VLOOKUP o tablas dinámicas, y ajustar manualmente los pedidos ítem por ítem. La herramienta procesa todos los ítems simultáneamente en segundos.
 
 **2. Eliminación de errores de cruce**
-Los cinco archivos de entrada usan convenciones de codificación distintas (prefijos en códigos de bodega, ceros a la izquierda en códigos de producto, nombres de columnas variables). En el proceso manual estos cruces fallan silenciosamente: un VLOOKUP que no encuentra el código simplemente devuelve vacío y la tienda no recibe pedido. La herramienta normaliza automáticamente todas las claves y detecta cuando un cruce no produce resultados.
+Los archivos de entrada usan convenciones de codificación distintas (prefijos en códigos de bodega, ceros a la izquierda en códigos de producto, nombres de columnas variables). En el proceso manual estos cruces fallan silenciosamente: un VLOOKUP que no encuentra el código simplemente devuelve vacío y la tienda no recibe pedido. La herramienta normaliza automáticamente todas las claves y reporta en la hoja Alertas cuando un cruce no produce resultados (p. ej. tienda-ítem sin match en Celes, o ítems con stock que se quedaron sin ninguna tienda elegible).
 
 **3. Criterio objetivo y consistente**
 En el proceso manual, la decisión de cuánto enviar a cada tienda depende del criterio y la experiencia de quien lo ejecuta. Esto genera variabilidad: distintas personas producen distribuciones distintas con los mismos datos. El algoritmo aplica siempre las mismas reglas: inventario proyectado mínimo de 3 días, prioridad a tiendas agotadas, distribución equitativa del sobrante.
@@ -97,10 +104,10 @@ Manualmente es fácil que queden cajas sin asignar por errores de redondeo o por
 Cuando hay un problema (ítem sin tiendas elegibles, archivo con columnas faltantes, cajas sin distribuir), la herramienta lo señala inmediatamente con un mensaje de error en la interfaz y lo registra en la hoja Alertas del Excel de salida. En el proceso manual estos problemas pasan desapercibidos o se detectan días después.
 
 **7. Trazabilidad y auditoría**
-El archivo de salida incluye tres hojas: la distribución detallada, un resumen de cajas por tienda y una hoja de alertas. Cualquier persona puede revisar por qué una tienda recibió determinada cantidad. En el proceso manual esto requiere recordar o documentar manualmente las decisiones tomadas.
+El archivo de salida incluye cinco hojas: la distribución detallada, un resumen de cajas por tienda, un desglose por ítem y fase de reparto, un análisis para el comprador (incluye riesgo de merma por ítem) y una hoja de alertas. Cualquier persona puede revisar por qué una tienda recibió determinada cantidad. En el proceso manual esto requiere recordar o documentar manualmente las decisiones tomadas.
 
 **8. Reducción del riesgo operativo**
-El proceso manual depende de que una persona específica sepa ejecutarlo correctamente. Si esa persona no está disponible, la distribución se retrasa o la ejecuta alguien sin experiencia con mayor riesgo de error. La herramienta puede ser operada por cualquier miembro del equipo con acceso a los cinco archivos.
+El proceso manual depende de que una persona específica sepa ejecutarlo correctamente. Si esa persona no está disponible, la distribución se retrasa o la ejecuta alguien sin experiencia con mayor riesgo de error. La herramienta puede ser operada por cualquier miembro del equipo con acceso a los archivos de entrada.
 
 ---
 

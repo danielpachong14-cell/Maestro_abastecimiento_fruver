@@ -11,15 +11,15 @@ elegibles de cada ítem en tres fases:
     antes de que cualquiera reciba su 2.ª, evitando concentración en tiendas de
     alto consumo cuando el stock es escaso.
 
-  FASE 2a — escalar proporcionalmente a TARGET_DAYS:
+  FASE 2 — escalar proporcionalmente a TARGET_DAYS:
     Cuando el stock no alcanza para llevar a TODOS a TARGET_DAYS, la escasez
     se reparte de forma proporcional a la necesidad de cada tienda. Ninguna
     tienda acapara cajas a costa de otras; todas reciben la misma fracción
     de su necesidad (corrección Hamilton para los residuos enteros).
     Cuando el stock SÍ alcanza, cada tienda recibe exactamente lo que necesita
-    y el verdadero sobrante va a Fase 2b.
+    y el verdadero sobrante va a Fase 3.
 
-  FASE 2b — sobrante repartido por días, no por cajas:
+  FASE 3 — sobrante repartido por días, no por cajas:
     Repartir la misma CANTIDAD DE CAJAS a tiendas con consumos muy distintos
     reparte cantidades muy distintas de DÍAS (Δdías ≈ cajas/consumo). Por eso
     el sobrante se reparte por rondas proporcional a `consumo_diario /
@@ -34,8 +34,8 @@ elegibles de cada ítem en tres fases:
     cero-residuo reparte por menor días proyectados ignorando ese límite.
 
     Para ítems de un mismo GRUPO ESPEJO (mismo producto físico, distinto SKU —
-    ver `grupo_id` en preprocessor.py), la Fase 2b se ejecuta de forma
-    CONJUNTA (`_fase2b_grupal`): elegibilidad, TOPE_EXCEDENTE y peso se
+    ver `grupo_id` en preprocessor.py), la Fase 3 se ejecuta de forma
+    CONJUNTA (`_fase3_grupal`): elegibilidad, TOPE_EXCEDENTE y peso se
     calculan sobre el inventario/consumo COMBINADO del grupo en cada tienda,
     pero cada ítem sigue entregándose desde su propio stock CEDI
     (MAX_CAJAS_POR_ITEM sigue por SKU). Si una tienda recibe sobrante del
@@ -45,10 +45,19 @@ elegibles de cada ítem en tres fases:
     ítem del grupo todavía tiene remanente (p. ej. recibió mucho más stock
     CEDI del que el portafolio combinado puede absorber), ese remanente se
     delega al Paso B individual de siempre (cero residuo por SKU).
+
+  GRUPOS ESPEJO EN FASE 1/2 — el mismo problema de doble conteo que resuelve
+    la Fase 3 grupal existe en Fase 1/2: la necesidad de TARGET_DAYS se calcula
+    a nivel de grupo (`_apportion_grupo_targets`) y se reparte ENTERA entre los
+    ítems del grupo (piso + Hamilton) en vez de redondear hacia arriba la
+    necesidad de cada ítem por separado — redondear por ítem sobreprovisiona
+    el CEDI (p. ej. 3 SKUs al 33% cada uno con necesidad_grupo=1.0 pedirían
+    3 cajas en vez de 1).
 """
 
 import math
 
+import numpy as np
 import pandas as pd
 
 TARGET_DAYS = 3.0           # días objetivo de inventario proyectado por tienda
@@ -59,6 +68,10 @@ MAX_CAJAS_POR_ITEM = 3      # tope duro: máximo que una tienda recibe por ítem
 TOPE_EXCEDENTE = 6       # máximo días que puede acumular una tienda del excedente
 UMBRAL_CONCENTRACION_SIN_CONSUMO = 5  # cajas: si Paso B concentraría >= esto en 1 tienda
                                        # por falta de consumo en el resto, reparto equitativo
+_EPS_DIAS_ACTUALES = 1e-3  # sustituye a días_actuales==0 al ponderar el excedente: una
+                            # tienda con 0 días es la MÁS urgente y debe recibir el mayor
+                            # peso posible, no cero (dividir por un epsilon pequeño en vez
+                            # de por 0 evita la división indefinida sin perder esa prioridad)
 
 
 def get_priority(row):
@@ -70,6 +83,10 @@ def get_priority(row):
     separado si entre los dos ya hay stock suficiente en la tienda. Para un
     ítem sin espejo (grupo de tamaño 1) estos valores son idénticos a los
     individuales, así que el comportamiento no cambia.
+
+    Opera fila a fila (recibe un `pd.Series`); para un DataFrame completo usar
+    la versión vectorizada `_compute_priority`, que debe producir el mismo
+    resultado.
     """
     inv = row.inventario_efectivo_grupo
     if inv < MIN_STOCK_AGOTADO:
@@ -81,15 +98,66 @@ def get_priority(row):
     return 0      # CUBIERTA (solo recibe si sobra)
 
 
+def _compute_priority(tiendas_df):
+    """Versión vectorizada de `get_priority` para un DataFrame completo —
+    evita el costo de `.apply(get_priority, axis=1)` fila por fila. Misma
+    lógica, mismo resultado."""
+    inv = tiendas_df['inventario_efectivo_grupo']
+    dias = tiendas_df['dias_proyectados_grupo']
+    return pd.Series(
+        np.select(
+            [inv < MIN_STOCK_AGOTADO, inv < MIN_STOCK_SAFETY, dias < TARGET_DAYS],
+            [3, 2, 1],
+            default=0,
+        ),
+        index=tiendas_df.index,
+    )
+
+
+def _apportion_grupo_targets(tiendas_df):
+    """Cajas necesarias en Fase 1/2 para que el GRUPO espejo de cada
+    (store_code, grupo_id) alcance TARGET_DAYS, repartidas ENTRE los ítems del
+    grupo con piso + corrección Hamilton (`_reparto_proporcional`) — el techo
+    (`ceil`) se aplica UNA sola vez por grupo, no por ítem.
+
+    Aplicar `ceil()` después de multiplicar por `item_share_consumo` (como
+    hacía la versión anterior de `_calc_deseadas`) sobreprovisiona: con 3
+    ítems espejo al 33% cada uno y `necesidad_grupo=1.0`, cada uno redondeaba
+    `ceil(0.33)=1` por separado, sumando 3 cajas donde el grupo solo
+    necesitaba 1. Redondeando una sola vez a nivel de grupo y repartiendo ese
+    entero, la suma nunca excede `ceil(necesidad_grupo)`.
+
+    Para un ítem sin espejo (grupo de tamaño 1, `item_share_consumo == 1.0`)
+    el resultado es idéntico a `ceil(necesidad_grupo)` — mismo comportamiento
+    de siempre.
+
+    Retorna una Series de enteros (cajas objetivo por ítem) alineada al
+    índice de `tiendas_df`.
+    """
+    necesidad_grupo = (
+        TARGET_DAYS * tiendas_df['consumo_diario_grupo'] - tiendas_df['inventario_efectivo_grupo']
+    ).clip(lower=0)
+
+    resultado = pd.Series(0, index=tiendas_df.index, dtype=int)
+    for _, idx in tiendas_df.groupby(['store_code', 'grupo_id']).groups.items():
+        total = math.ceil(necesidad_grupo.loc[idx].iloc[0])
+        if total <= 0:
+            continue
+        pesos = tiendas_df.loc[idx, 'item_share_consumo']
+        room = pd.Series(total, index=idx)
+        resultado.loc[idx] = _reparto_proporcional(pesos, total, room)
+    return resultado
+
+
 def _calc_deseadas(row, cap):
     """Cajas que la tienda querría recibir, limitadas por el cap del pase.
 
-    La necesidad se calcula a nivel de GRUPO espejo (cuántas cajas hacen falta
-    para que el conjunto de ítems espejo llegue a TARGET_DAYS) y se reparte
-    entre los ítems del grupo proporcional al consumo de cada uno
-    (item_share_consumo) — así nunca se duplica la reposición entre ítems que
-    cubren la misma demanda. Para un ítem sin espejo, item_share_consumo == 1
-    y el resultado es idéntico al cálculo individual de antes.
+    Lee `row.cajas_target_grupo` (precalculado por `_apportion_grupo_targets`
+    a nivel de grupo, ver módulo) en vez de volver a redondear la necesidad
+    del ítem por separado. Si la fila no trae esa columna (p. ej. una llamada
+    aislada en tests con un `pd.Series` construido a mano) se recalcula con la
+    fórmula anterior — para un ítem sin espejo (`item_share_consumo == 1`) da
+    exactamente el mismo resultado.
 
     consumo_diario e inventario_efectivo están en cajas (Unidades de Distribución),
     igual que cajas_disponibles_cedi, así que no se necesita conversión.
@@ -97,16 +165,16 @@ def _calc_deseadas(row, cap):
     if row.consumo_diario <= 0:
         # Sin consumo: no se puede proyectar demanda; mínimo según prioridad.
         return 1 if row.priority >= 2 else 0
-    # Cajas necesarias para que el GRUPO alcance el objetivo de días, repartidas
-    # entre los ítems del grupo según su participación en el consumo.
-    necesidad_grupo = max(0.0, TARGET_DAYS * row.consumo_diario_grupo - row.inventario_efectivo_grupo)
-    cajas_needed = math.ceil(necesidad_grupo * row.item_share_consumo)
+    cajas_target = getattr(row, 'cajas_target_grupo', None)
+    if cajas_target is None:
+        necesidad_grupo = max(0.0, TARGET_DAYS * row.consumo_diario_grupo - row.inventario_efectivo_grupo)
+        cajas_target = math.ceil(necesidad_grupo * row.item_share_consumo)
     min_boxes = 1 if row.priority >= 2 else 0
-    return max(min_boxes, min(cajas_needed, cap))
+    return max(min_boxes, min(int(cajas_target), cap))
 
 
 def _reparto_proporcional(pesos, total, room):
-    """Reparte hasta `total` cajas (entero) proporcional a `pesos` (>= 0), sin
+    """Reparte hasta `total` cajas (entero) proporcional a `pesos`, sin
     exceder `room` (espacio restante) por tienda. Usa piso + corrección
     Hamilton para que la suma entera coincida con `total` — o con `room.sum()`
     si éste es menor — repartiendo el residuo a quienes tienen mayor fracción
@@ -117,23 +185,29 @@ def _reparto_proporcional(pesos, total, room):
     que hace que el incremento de días proyectados (`Δdías_i = Δstock_i /
     consumo_i`) sea igual para todas — reparte días, no solo cajas.
 
+    Pesos negativos se descartan (`clip(lower=0)`): pueden aparecer si un
+    valor de inventario negativo se cuela aguas arriba (no debería, ver
+    `.clip(lower=0)` en preprocessor.py, pero esta función no depende de esa
+    garantía externa para mantener la suma exacta).
+
     Retorna una Series de enteros con las cajas asignadas en esta pasada
     (mismo índice que `pesos`).
     """
+    pesos = pesos.clip(lower=0)
     asignado = pd.Series(0, index=pesos.index, dtype=int)
     total_pesos = float(pesos.sum())
     total = int(total)
     if total_pesos <= 0 or total <= 0:
         return asignado
 
-    objetivo = (pesos / total_pesos * total).clip(upper=room)
+    objetivo = (pesos / total_pesos * total).clip(lower=0, upper=room)
     piso = objetivo.apply(math.floor).astype(int)
     asignado += piso
     sobra = total - int(piso.sum())
 
     if sobra > 0:
         espacio = room - piso
-        fracs = (objetivo - piso).where(espacio > 0, -1.0).sort_values(ascending=False)
+        fracs = (objetivo - piso).where(espacio > 0, -1.0).sort_values(ascending=False, kind='stable')
         for idx in fracs.index:
             if sobra <= 0 or fracs[idx] < 0:
                 break
@@ -143,28 +217,40 @@ def _reparto_proporcional(pesos, total, room):
     return asignado
 
 
-def _priorizar_y_fase1_2a(cajas_disponibles, tiendas_df):
-    """Calcula prioridad y ejecuta Fase 1 + Fase 2a para un ítem.
+def _priorizar_y_fases_1_2(cajas_disponibles, tiendas_df):
+    """Calcula prioridad y ejecuta Fase 1 + Fase 2 para un ítem.
 
-    Retorna (tiendas, remaining). No genera alertas — las fases 1/2a nunca
+    Si `tiendas_df` no trae ya la columna `cajas_target_grupo` (ver
+    `_apportion_grupo_targets`), la calcula sobre las filas recibidas —
+    correcto para una llamada aislada de un solo ítem (sin coordinación con
+    sus hermanos espejo), pero `run_distribution` la precalcula sobre TODO
+    `df_merged` antes de trocearlo por ítem, para que sí haya coordinación
+    real entre ítems del mismo grupo.
+
+    Retorna (tiendas, remaining). No genera alertas — las fases 1/2 nunca
     dejan remanente "atascado" sin tiendas elegibles de forma anómala (eso
-    solo puede pasar en Fase 2b); si `tiendas_df` está vacío, `remaining`
+    solo puede pasar en Fase 3); si `tiendas_df` está vacío, `remaining`
     simplemente queda igual a `cajas_disponibles`.
     """
     tiendas = tiendas_df.copy()
-    tiendas['priority'] = tiendas.apply(get_priority, axis=1)
+    tiendas['priority'] = _compute_priority(tiendas)
     tiendas['cajas_asignadas'] = 0
     tiendas['cajas_fase1'] = 0
-    tiendas['cajas_fase2a'] = 0
-    tiendas['cajas_fase2b'] = 0
+    tiendas['cajas_fase2'] = 0
+    tiendas['cajas_fase3'] = 0
     remaining = int(cajas_disponibles)
 
     if len(tiendas) == 0:
         return tiendas, remaining
 
-    # Orden: prioridad DESC, consumo DESC (agotados y mejores vendedores primero).
+    if 'cajas_target_grupo' not in tiendas.columns:
+        tiendas['cajas_target_grupo'] = _apportion_grupo_targets(tiendas)
+
+    # Orden: prioridad DESC, consumo DESC (agotados y mejores vendedores
+    # primero); store_code como desempate terciario para que el orden sea
+    # determinista entre corridas ante empates exactos de prioridad/consumo.
     tiendas = tiendas.sort_values(
-        ['priority', 'consumo_diario'], ascending=False
+        ['priority', 'consumo_diario', 'store_code'], ascending=[False, False, True]
     ).reset_index(drop=True)
 
     # FASE 1 — rondas con cap creciente (1 → MIN_CAJAS_INICIAL).
@@ -185,7 +271,7 @@ def _priorizar_y_fase1_2a(cajas_disponibles, tiendas_df):
             tiendas.at[idx, 'cajas_fase1'] += asignar
             remaining -= asignar
 
-    # FASE 2a — completar TARGET_DAYS de forma proporcional.
+    # FASE 2 — completar TARGET_DAYS de forma proporcional.
     # Calcula la necesidad de cada tienda para llegar a TARGET_DAYS y distribuye
     # el stock restante con un factor de escala. Si el stock alcanza para todos,
     # cada tienda recibe exactamente lo que necesita. Si no alcanza, la escasez
@@ -215,16 +301,16 @@ def _priorizar_y_fase1_2a(cajas_disponibles, tiendas_df):
             # sin arriesgar exceder `room` en la corrección Hamilton.
             asignado = _reparto_proporcional(needs, min(remaining, total_need), room)
             tiendas['cajas_asignadas'] += asignado
-            tiendas['cajas_fase2a'] += asignado
+            tiendas['cajas_fase2'] += asignado
             remaining -= int(asignado.sum())
 
     return tiendas, remaining
 
 
-def _fase2b_individual(item_code, tiendas, remaining):
+def _fase3_individual(item_code, tiendas, remaining):
     """Reparte el sobrante de UN ítem entre sus tiendas (sin ver otros ítems
     del mismo grupo espejo). Usado para ítems sin espejo y como red de
-    seguridad de cero-residuo cuando la Fase 2b grupal no logra colocar todo
+    seguridad de cero-residuo cuando la Fase 3 grupal no logra colocar todo
     el remanente de un ítem específico.
 
     Retorna (tiendas, remaining, alertas_item). remaining debe terminar en 0.
@@ -235,21 +321,23 @@ def _fase2b_individual(item_code, tiendas, remaining):
     if len(tiendas) == 0 or remaining <= 0:
         return tiendas, remaining, alertas_item
 
-    # FASE 2b — excedente: repartir cada ronda proporcional a
+    # FASE 3 — excedente: repartir cada ronda proporcional a
     # `consumo_diario / días_actuales` entre las tiendas elegibles (consumo > 0,
     # bajo TOPE_EXCEDENTE tras recibir, sin alcanzar aún MAX_CAJAS_POR_ITEM).
     #
     # Por qué ese peso y no "1 caja por tienda" ni "proporcional al consumo a
     # secas": repartir cantidades IGUALES de cajas reparte cantidades MUY
-    # DESIGUALES de días (Δdías ≈ cajas / consumo, y el consumo varía hasta
-    # ~12x entre tiendas) — la tienda lenta gana muchos más días por caja que
-    # la rápida, que es justo el desbalance que se busca evitar. Ponderar por
-    # `consumo_diario / días_actuales` (= consumo² / stock) dosifica el
-    # excedente según dos señales: cuánto vende (consumo) y qué tan atrás va
-    # respecto al resto (1/días); el resultado es que el incremento de días de
-    # cada tienda es inversamente proporcional a sus días actuales
-    # (Δdías_i = k / días_i): las que van más atrasadas se acercan más rápido
-    # al resto en lugar de mantener — o ampliar — la brecha.
+    # DESIGUALES de días (Δdías ≈ cajas / consumo) — la tienda lenta gana
+    # muchos más días por caja que la rápida, que es justo el desbalance que
+    # se busca evitar. Ponderar por `consumo_diario / días_actuales` (=
+    # consumo² / stock) dosifica el excedente según dos señales: cuánto vende
+    # (consumo) y qué tan atrás va respecto al resto (1/días); el resultado es
+    # que el incremento de días de cada tienda es inversamente proporcional a
+    # sus días actuales (Δdías_i = k / días_i): las que van más atrasadas se
+    # acercan más rápido al resto en lugar de mantener — o ampliar — la
+    # brecha. Detalle de implementación en `_EPS_DIAS_ACTUALES` (arriba):
+    # una tienda con 0 días actuales es la más urgente y debe tener el mayor
+    # peso, no uno nulo.
     con_consumo_mask = tiendas['consumo_diario'] > 0
 
     if con_consumo_mask.any():
@@ -282,14 +370,14 @@ def _fase2b_individual(item_code, tiendas, remaining):
             )
             if not elegibles_mask.any():
                 break
-            pesos = (tiendas['consumo_diario'] / dias_act.replace(0, float('nan'))).where(elegibles_mask, 0.0)
-            pesos = pesos.fillna(0.0)
+            dias_act_ponderable = dias_act.mask(dias_act <= 0, _EPS_DIAS_ACTUALES)
+            pesos = (tiendas['consumo_diario'] / dias_act_ponderable).where(elegibles_mask, 0.0)
             room = ((MAX_CAJAS_POR_ITEM - tiendas['cajas_asignadas'])
                     .clip(lower=0)
                     .where(elegibles_mask, 0))
             asignado = _reparto_proporcional(pesos, remaining, room)
             tiendas['cajas_asignadas'] += asignado
-            tiendas['cajas_fase2b'] += asignado
+            tiendas['cajas_fase3'] += asignado
             remaining -= int(asignado.sum())
 
         # Paso B: si todas llegaron al tope (caso extremo), red de
@@ -299,7 +387,7 @@ def _fase2b_individual(item_code, tiendas, remaining):
             stock_act = tiendas['inventario_efectivo'] + tiendas['cajas_asignadas']
             dias_act = (stock_act[con_consumo_mask]
                         / tiendas.loc[con_consumo_mask, 'consumo_diario'])
-            order = dias_act.sort_values(ascending=True).index.tolist()
+            order = dias_act.sort_values(ascending=True, kind='stable').index.tolist()
 
             n_con_consumo = int(con_consumo_mask.sum())
             n_sin_consumo = len(tiendas) - n_con_consumo
@@ -316,7 +404,7 @@ def _fase2b_individual(item_code, tiendas, remaining):
                 while remaining > 0:
                     idx_min = tiendas['cajas_asignadas'].idxmin()
                     tiendas.at[idx_min, 'cajas_asignadas'] += 1
-                    tiendas.at[idx_min, 'cajas_fase2b'] += 1
+                    tiendas.at[idx_min, 'cajas_fase3'] += 1
                     remaining -= 1
                 alertas_item.append({
                     'tipo': 'ADVERTENCIA',
@@ -341,7 +429,7 @@ def _fase2b_individual(item_code, tiendas, remaining):
                 i = 0
                 while remaining > 0:
                     tiendas.at[order[i % len(order)], 'cajas_asignadas'] += 1
-                    tiendas.at[order[i % len(order)], 'cajas_fase2b'] += 1
+                    tiendas.at[order[i % len(order)], 'cajas_fase3'] += 1
                     remaining -= 1
                     i += 1
     else:
@@ -350,19 +438,19 @@ def _fase2b_individual(item_code, tiendas, remaining):
         i = 0
         while remaining > 0 and indices:
             tiendas.at[indices[i % len(indices)], 'cajas_asignadas'] += 1
-            tiendas.at[indices[i % len(indices)], 'cajas_fase2b'] += 1
+            tiendas.at[indices[i % len(indices)], 'cajas_fase3'] += 1
             remaining -= 1
             i += 1
 
     return tiendas, remaining, alertas_item
 
 
-def _fase2b_grupal(estado_items):
+def _fase3_grupal(estado_items):
     """Reparte el sobrante de un GRUPO de ítems espejo de forma conjunta.
 
     `estado_items` es un dict {item_code: {'tiendas': df, 'remaining': int}}
-    con todos los ítems de un mismo `grupo_id` ya resueltos en Fase 1/2a
-    (vía `_priorizar_y_fase1_2a`). Cada `tiendas` df tiene columna
+    con todos los ítems de un mismo `grupo_id` ya resueltos en Fase 1/2
+    (vía `_priorizar_y_fases_1_2`). Cada `tiendas` df tiene columna
     `store_code` única por fila.
 
     Elegibilidad, TOPE_EXCEDENTE y peso (`consumo/días_actuales`) se calculan
@@ -434,7 +522,8 @@ def _fase2b_grupal(estado_items):
         if not elegibles_mask.any():
             break
 
-        pesos = (consumo_grupo / dias_act.replace(0, float('nan'))).where(elegibles_mask, 0.0).fillna(0.0)
+        dias_act_ponderable = dias_act.mask(dias_act <= 0, _EPS_DIAS_ACTUALES)
+        pesos = (consumo_grupo / dias_act_ponderable).where(elegibles_mask, 0.0)
         room_elig = room_store.where(elegibles_mask, 0)
         total_pool = sum(remaining[c] for c in activos)
         asignado_store = _reparto_proporcional(pesos, total_pool, room_elig)
@@ -460,7 +549,7 @@ def _fase2b_grupal(estado_items):
                 stock_item = t.at[store, 'inventario_efectivo'] + t.at[store, 'cajas_asignadas']
                 if stock_item <= 1e-9 and not bool(t.at[store, 'garantizado']):
                     t.at[store, 'cajas_asignadas'] += 1
-                    t.at[store, 'cajas_fase2b'] += 1
+                    t.at[store, 'cajas_fase3'] += 1
                     t.at[store, 'garantizado'] = True
                     remaining[c] -= 1
                     n -= 1
@@ -486,7 +575,7 @@ def _fase2b_grupal(estado_items):
                 if cajas <= 0:
                     continue
                 tablas[c].at[store, 'cajas_asignadas'] += int(cajas)
-                tablas[c].at[store, 'cajas_fase2b'] += int(cajas)
+                tablas[c].at[store, 'cajas_fase3'] += int(cajas)
                 remaining[c] -= int(cajas)
 
         total_remaining = sum(remaining.values())
@@ -504,7 +593,7 @@ def _fase2b_grupal(estado_items):
             t = t.drop(columns=['garantizado']).reset_index(drop=True)
         rem = remaining[code]
         if rem > 0:
-            t, rem, alertas_item = _fase2b_individual(code, t, rem)
+            t, rem, alertas_item = _fase3_individual(code, t, rem)
             alertas_por_item[code].extend(alertas_item)
         resultado[code] = {'tiendas': t, 'remaining': rem}
 
@@ -520,35 +609,72 @@ def distribuir_item(item_code, cajas_disponibles, tiendas_df):
     inventario. alertas_item es una lista (posiblemente vacía) de dicts
     {tipo, item, mensaje, ...} con advertencias detectadas durante el reparto.
     """
-    tiendas, remaining = _priorizar_y_fase1_2a(cajas_disponibles, tiendas_df)
+    tiendas, remaining = _priorizar_y_fases_1_2(cajas_disponibles, tiendas_df)
     if len(tiendas) == 0:
         return tiendas, remaining, []
-    return _fase2b_individual(item_code, tiendas, remaining)
+    return _fase3_individual(item_code, tiendas, remaining)
 
 
-def run_distribution(df_merged):
+def run_distribution(df_merged, alertas_extra=None):
     """Ejecuta la distribución para todos los ítems del DataFrame unificado.
 
-    Fase 1/2a se calcula por ítem (ya usa métricas de grupo espejo
-    precalculadas). Fase 2b se ejecuta por ítem individual para grupos de
-    tamaño 1, o de forma conjunta (`_fase2b_grupal`) para grupos con más de
-    un ítem con stock CEDI disponible.
+    `alertas_extra` (opcional): alertas ya detectadas aguas arriba (p. ej. en
+    `preprocessor.build_distribution_df`, ítems huérfanos o filas descartadas
+    por normalización) que se anteponen a las que genera esta función.
+
+    Fase 1/2 se calcula por ítem, pero con la necesidad de grupo espejo
+    precalculada sobre TODO `df_merged` (`_apportion_grupo_targets`) antes de
+    trocear por ítem, para que sí haya coordinación real entre ítems
+    hermanos. Fase 3 se ejecuta por ítem individual para grupos de tamaño 1,
+    o de forma conjunta (`_fase3_grupal`) para grupos con más de un ítem con
+    stock CEDI disponible.
 
     Retorna (df_output, alertas):
       - df_output: filas con cajas_asignadas > 0
       - alertas: lista de dicts {tipo, item, mensaje}
     """
     results = []
-    alertas = []
+    alertas = list(alertas_extra or [])
 
     if df_merged is None or len(df_merged) == 0:
-        return pd.DataFrame(), [{
+        alertas.append({
             'tipo': 'ERROR', 'item': '-',
             'mensaje': 'No hay combinaciones tienda-ítem elegibles tras el cruce. '
                        'Revisar archivos de entrada.'
-        }]
+        })
+        return pd.DataFrame(), alertas
 
-    # Pasada 1: prioridad + Fase 1 + Fase 2a, por ítem.
+    df_merged = df_merged.copy()
+
+    # Alerta agregada (una sola, no por ítem, para no saturar la hoja de
+    # Alertas): combinaciones tienda-ítem sin match en Celes se tratan con
+    # consumo=0/inventario=0 aguas abajo, lo que las clasifica como AGOTADA
+    # sin serlo necesariamente — ver preprocessor.build_distribution_df.
+    if 'sin_match_celes' in df_merged.columns:
+        sin_match_mask = df_merged['sin_match_celes'].fillna(False)
+        n_sin_match = int(sin_match_mask.sum())
+        if n_sin_match > 0:
+            pct = round(n_sin_match / len(df_merged) * 100, 1)
+            n_items = df_merged.loc[sin_match_mask, 'item_code'].nunique()
+            alertas.append({
+                'tipo': 'ADVERTENCIA',
+                'item': '-',
+                'mensaje': (
+                    f'{n_sin_match} combinación(es) tienda-ítem ({pct}% del total, '
+                    f'{n_items} ítem(s) afectados) no tuvieron match en Celes — se '
+                    'trataron con consumo=0 e inventario=0 (riesgo de clasificarse '
+                    'como AGOTADA sin serlo). Revisar cobertura de Celes.'
+                ),
+                'combos_sin_match': n_sin_match,
+                'items_afectados': int(n_items),
+                'pct_del_total': pct,
+            })
+
+    # Necesidad de grupo espejo precalculada sobre TODO el universo antes de
+    # trocear por ítem — ver docstring del módulo y de _apportion_grupo_targets.
+    df_merged['cajas_target_grupo'] = _apportion_grupo_targets(df_merged)
+
+    # Pasada 1: prioridad + Fase 1 + Fase 2, por ítem.
     estado = {}
     grupo_de_item = {}
     for item_code, group in df_merged.groupby('item_code'):
@@ -556,11 +682,11 @@ def run_distribution(df_merged):
         if cajas_disponibles <= 0:
             continue  # skip silencioso: ítem sin stock en cajas
 
-        tiendas, remaining = _priorizar_y_fase1_2a(cajas_disponibles, group)
+        tiendas, remaining = _priorizar_y_fases_1_2(cajas_disponibles, group)
         estado[item_code] = {'tiendas': tiendas, 'remaining': remaining}
         grupo_de_item[item_code] = group['grupo_id'].iloc[0]
 
-    # Pasada 2: Fase 2b — individual para grupos de tamaño 1, conjunta para
+    # Pasada 2: Fase 3 — individual para grupos de tamaño 1, conjunta para
     # grupos con más de un ítem (productos espejo).
     items_por_grupo = {}
     for item_code, grupo_id in grupo_de_item.items():
@@ -572,14 +698,14 @@ def run_distribution(df_merged):
             est = estado[item_code]
             if len(est['tiendas']) == 0:
                 continue  # remaining queda igual; se reporta como alerta abajo
-            tiendas_result, remaining, alertas_item = _fase2b_individual(
+            tiendas_result, remaining, alertas_item = _fase3_individual(
                 item_code, est['tiendas'], est['remaining']
             )
             estado[item_code] = {'tiendas': tiendas_result, 'remaining': remaining}
             alertas.extend(alertas_item)
         else:
             estado_grupo = {c: estado[c] for c in item_codes}
-            resultado_grupo, alertas_por_item = _fase2b_grupal(estado_grupo)
+            resultado_grupo, alertas_por_item = _fase3_grupal(estado_grupo)
             for c in item_codes:
                 estado[c] = resultado_grupo[c]
                 alertas.extend(alertas_por_item[c])

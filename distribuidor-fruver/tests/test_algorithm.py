@@ -1,5 +1,7 @@
 """Tests unitarios del motor de distribución."""
 
+import math
+
 import pandas as pd
 import pytest
 
@@ -10,8 +12,12 @@ from core.algorithm import (
     TARGET_DAYS,
     TOPE_EXCEDENTE,
     UMBRAL_CONCENTRACION_SIN_CONSUMO,
-    _fase2b_grupal,
+    _apportion_grupo_targets,
+    _fase3_grupal,
+    _fase3_individual,
+    _reparto_proporcional,
     distribuir_item,
+    run_distribution,
 )
 
 
@@ -195,7 +201,7 @@ def test_surplus_no_amplifica_brecha_de_dias():
 
 
 def test_excedente_respeta_tope_para_todas_las_tiendas():
-    """El reparto del sobrante (Fase 2b) no debe dejar a NINGUNA tienda —
+    """El reparto del sobrante (Fase 3) no debe dejar a NINGUNA tienda —
     de alto, medio o bajo consumo — por encima de TOPE_EXCEDENTE días, ni
     recibiendo más de MAX_CAJAS_POR_ITEM cajas, cuando el sobrante alcanza
     para que el "Paso A" (proporcional, con tope) resuelva todo sin caer
@@ -203,7 +209,7 @@ def test_excedente_respeta_tope_para_todas_las_tiendas():
     del usuario: que las tiendas de consumo medio no terminen sobre-stockeadas.
 
     Las 3 tiendas arrancan EXACTAMENTE en TARGET_DAYS (cubiertas, no piden
-    nada en Fase 1/2a). El sobrante (7 cajas) coincide con la suma exacta
+    nada en Fase 1/2). El sobrante (7 cajas) coincide con la suma exacta
     del "espacio" que cada una tiene bajo sus topes:
       ALTA  (consumo=3.0, 9.0 cj =  3.0d): tope de cajas (MAX=3) manda   → cabe hasta +3
       MEDIA (consumo=1.0, 3.0 cj =  3.0d): tope de cajas (MAX=3) manda   → cabe hasta +3
@@ -266,14 +272,14 @@ def test_paso_b_activa_y_reparte_por_menor_dias_actuales():
     assert p_row['cajas_asignadas'] > MAX_CAJAS_POR_ITEM, (
         "Se esperaba que el Paso B ignorara MAX_CAJAS_POR_ITEM para P"
     )
-    assert q_row['cajas_fase2b'] > 0, "Q también debía recibir parte del residuo"
+    assert q_row['cajas_fase3'] > 0, "Q también debía recibir parte del residuo"
 
     # P iba más atrasada (1.5 días tras Fase 1, frente a los 6.0 de Q) →
     # el round-robin de Paso B la prioriza, dándole el primer (y por tanto
     # más) reparto de las 5 cajas restantes (3 vs 2).
-    assert p_row['cajas_fase2b'] > q_row['cajas_fase2b'], (
+    assert p_row['cajas_fase3'] > q_row['cajas_fase3'], (
         "El Paso B debía priorizar a P (menor días_actuales) sobre Q "
-        f"(P recibió {p_row['cajas_fase2b']}, Q recibió {q_row['cajas_fase2b']})"
+        f"(P recibió {p_row['cajas_fase3']}, Q recibió {q_row['cajas_fase3']})"
     )
 
 
@@ -399,9 +405,9 @@ def test_item_sin_espejo_comportamiento_idéntico():
     assert asignada >= 1
 
 
-def _tienda_post_fase2a(store_code, consumo, inventario_efectivo, item_share_consumo, cajas_asignadas=0):
-    """Fila de tienda ya resuelta en Fase 1/2a (lista para alimentar
-    _fase2b_grupal / _fase2b_individual directamente)."""
+def _tienda_post_fase2(store_code, consumo, inventario_efectivo, item_share_consumo, cajas_asignadas=0):
+    """Fila de tienda ya resuelta en Fase 1/2 (lista para alimentar
+    _fase3_grupal / _fase3_individual directamente)."""
     return {
         'store_code': store_code,
         'consumo_diario': consumo,
@@ -409,8 +415,8 @@ def _tienda_post_fase2a(store_code, consumo, inventario_efectivo, item_share_con
         'item_share_consumo': item_share_consumo,
         'cajas_asignadas': cajas_asignadas,
         'cajas_fase1': 0,
-        'cajas_fase2a': 0,
-        'cajas_fase2b': 0,
+        'cajas_fase2': 0,
+        'cajas_fase3': 0,
     }
 
 
@@ -418,10 +424,10 @@ def _estado(rows, remaining):
     return {'tiendas': pd.DataFrame(rows), 'remaining': remaining}
 
 
-def test_fase2b_grupal_garantiza_presencia_y_respeta_tope_por_item():
+def test_fase3_grupal_garantiza_presencia_y_respeta_tope_por_item():
     """Tienda T, grupo con ítems A y B (consumo y participación simétricos
     50/50). A ya tiene 1.0 caja en góndola; B tiene 0 (no está en góndola
-    aunque el CEDI sí tenga stock de B). Tras la Fase 2b grupal:
+    aunque el CEDI sí tenga stock de B). Tras la Fase 3 grupal:
       - B debe recibir al menos 1 caja (garantía de presencia), no solo lo
         que le tocaría por su participación en el consumo.
       - Ningún ítem debe superar MAX_CAJAS_POR_ITEM (tope individual, no de
@@ -429,12 +435,12 @@ def test_fase2b_grupal_garantiza_presencia_y_respeta_tope_por_item():
       - Cero residuo: con estos números exactos, ambos pools quedan en 0.
     """
     estado_items = {
-        'A': _estado([_tienda_post_fase2a('T', consumo=1.0, inventario_efectivo=1.0,
+        'A': _estado([_tienda_post_fase2('T', consumo=1.0, inventario_efectivo=1.0,
                                            item_share_consumo=0.5)], remaining=3),
-        'B': _estado([_tienda_post_fase2a('T', consumo=1.0, inventario_efectivo=0.0,
+        'B': _estado([_tienda_post_fase2('T', consumo=1.0, inventario_efectivo=0.0,
                                            item_share_consumo=0.5)], remaining=3),
     }
-    resultado, alertas = _fase2b_grupal(estado_items)
+    resultado, alertas = _fase3_grupal(estado_items)
 
     a_asig = int(resultado['A']['tiendas'].loc[0, 'cajas_asignadas'])
     b_asig = int(resultado['B']['tiendas'].loc[0, 'cajas_asignadas'])
@@ -448,7 +454,7 @@ def test_fase2b_grupal_garantiza_presencia_y_respeta_tope_por_item():
     assert b_asig + resultado['B']['remaining'] == 3
 
 
-def test_fase2b_grupal_tope_excedente_es_del_grupo_no_del_item():
+def test_fase3_grupal_tope_excedente_es_del_grupo_no_del_item():
     """Dos tiendas, mismo grupo (A, B):
 
       T1: A tiene consumo bajísimo (0.1) pero MUCHO inventario (70 cajas,
@@ -459,20 +465,20 @@ def test_fase2b_grupal_tope_excedente_es_del_grupo_no_del_item():
 
     Con TOPE_EXCEDENTE evaluado a nivel de GRUPO, T1 no debe recibir NADA de
     sobrante (ni A ni B) — todo el sobrante debe ir a T2, que sí es elegible.
-    Antes de este cambio (Fase 2b por ítem), B en T1 habría calificado igual
+    Antes de este cambio (Fase 3 por ítem), B en T1 habría calificado igual
     que cualquier tienda con 0 días y se le habría asignado sobrante.
     """
     estado_items = {
         'A': _estado([
-            _tienda_post_fase2a('T1', consumo=0.1, inventario_efectivo=70.0, item_share_consumo=0.1 / 2.1),
-            _tienda_post_fase2a('T2', consumo=1.0, inventario_efectivo=1.0, item_share_consumo=0.5),
+            _tienda_post_fase2('T1', consumo=0.1, inventario_efectivo=70.0, item_share_consumo=0.1 / 2.1),
+            _tienda_post_fase2('T2', consumo=1.0, inventario_efectivo=1.0, item_share_consumo=0.5),
         ], remaining=2),
         'B': _estado([
-            _tienda_post_fase2a('T1', consumo=2.0, inventario_efectivo=0.0, item_share_consumo=2.0 / 2.1),
-            _tienda_post_fase2a('T2', consumo=1.0, inventario_efectivo=0.0, item_share_consumo=0.5),
+            _tienda_post_fase2('T1', consumo=2.0, inventario_efectivo=0.0, item_share_consumo=2.0 / 2.1),
+            _tienda_post_fase2('T2', consumo=1.0, inventario_efectivo=0.0, item_share_consumo=0.5),
         ], remaining=2),
     }
-    resultado, alertas = _fase2b_grupal(estado_items)
+    resultado, alertas = _fase3_grupal(estado_items)
 
     a_t1 = int(resultado['A']['tiendas'].set_index('store_code').loc['T1', 'cajas_asignadas'])
     b_t1 = int(resultado['B']['tiendas'].set_index('store_code').loc['T1', 'cajas_asignadas'])
@@ -489,7 +495,7 @@ def test_fase2b_grupal_tope_excedente_es_del_grupo_no_del_item():
     assert resultado['B']['remaining'] == 0
 
 
-def test_fase2b_grupal_cero_residuo_delega_a_paso_b_individual():
+def test_fase3_grupal_cero_residuo_delega_a_paso_b_individual():
     """Una sola tienda, grupo con A y B: el CEDI manda MUCHO más de lo que la
     tienda puede absorber bajo MAX_CAJAS_POR_ITEM (3 por ítem). El Paso A
     grupal llena ambos hasta el tope (3 cada uno) y luego se queda sin
@@ -497,12 +503,12 @@ def test_fase2b_grupal_cero_residuo_delega_a_paso_b_individual():
     individual (cero residuo, ignora MAX_CAJAS_POR_ITEM) para que la garantía
     de cero residuo se cumpla igual que en el camino sin grupo."""
     estado_items = {
-        'A': _estado([_tienda_post_fase2a('UNICA', consumo=2.0, inventario_efectivo=0.0,
+        'A': _estado([_tienda_post_fase2('UNICA', consumo=2.0, inventario_efectivo=0.0,
                                            item_share_consumo=2.0 / 3.0)], remaining=10),
-        'B': _estado([_tienda_post_fase2a('UNICA', consumo=1.0, inventario_efectivo=6.0,
+        'B': _estado([_tienda_post_fase2('UNICA', consumo=1.0, inventario_efectivo=6.0,
                                            item_share_consumo=1.0 / 3.0)], remaining=10),
     }
-    resultado, alertas = _fase2b_grupal(estado_items)
+    resultado, alertas = _fase3_grupal(estado_items)
 
     assert resultado['A']['remaining'] == 0, "Cero residuo debe mantenerse para A vía Paso B individual"
     assert resultado['B']['remaining'] == 0, "Cero residuo debe mantenerse para B vía Paso B individual"
@@ -512,6 +518,175 @@ def test_fase2b_grupal_cero_residuo_delega_a_paso_b_individual():
     assert a_asig == 10, "Única tienda del portafolio: debía recibir todo el CEDI de A"
     assert b_asig == 10, "Única tienda del portafolio: debía recibir todo el CEDI de B"
     assert a_asig > MAX_CAJAS_POR_ITEM, "Solo el Paso B (cero residuo) ignora MAX_CAJAS_POR_ITEM"
+
+
+# ── Tests nuevos: auditoría técnica 2026-07 ─────────────────────────────────
+
+def test_grupo_espejo_multiple_no_sobreprovisiona_por_doble_ceil():
+    """Bug de auditoría: 3 SKUs espejo en la misma tienda, cada uno con ~33%
+    de participación en el consumo del grupo, y una necesidad de grupo de
+    apenas 1.0 caja. La lógica anterior aplicaba `ceil()` DESPUÉS de repartir
+    la necesidad por ítem (`ceil(1.0 * 0.333) = 1` cada uno), sumando 3 cajas
+    en Fase 1 donde el grupo solo necesitaba 1. Vía `run_distribution` (el
+    único camino con visibilidad real entre ítems hermanos), el total
+    asignado en Fase 1+2 al grupo no debe exceder `ceil(necesidad_grupo)`.
+    """
+    stores = ['T']
+    rows = []
+    for item_code, share in [('A', 1 / 3), ('B', 1 / 3), ('C', 1 / 3)]:
+        rows.append({
+            'store_code': 'T', 'item_code': item_code, 'grupo_id': 'GESPEJO',
+            'consumo_diario': 1.0 / 3, 'consumo_diario_grupo': 1.0,
+            'inventario_efectivo': 0.0, 'inventario_efectivo_grupo': 2.0,
+            'dias_proyectados': 0.0, 'dias_proyectados_grupo': 2.0,
+            'item_share_consumo': share,
+            'cajas_disponibles_cedi': 5, 'store_name': 'T', 'um': 'UND',
+            'item_desc': f'Producto {item_code}',
+        })
+    df_merged = pd.DataFrame(rows)
+    # necesidad_grupo = max(0, 3.0*1.0 - 2.0) = 1.0 -> ceil = 1 caja total para el grupo.
+    df_output, alertas = run_distribution(df_merged)
+
+    total_fase1_fase2 = int((df_output['cajas_fase1'] + df_output['cajas_fase2']).sum())
+    assert total_fase1_fase2 <= 1, (
+        "El grupo solo necesitaba 1 caja para llegar a TARGET_DAYS pero se "
+        f"asignaron {total_fase1_fase2} entre Fase 1 y Fase 2 — doble ceil "
+        "por ítem sobreprovisionando el grupo"
+    )
+    # Cero residuo se mantiene igual (el resto del CEDI, 5 cajas por cada uno
+    # de los 3 SKUs, cae a Fase 3).
+    assert int(df_output['cajas_asignadas'].sum()) == 15
+
+
+def test_apportion_grupo_targets_item_sin_espejo_identico_a_ceil_directo():
+    """Para un ítem sin espejo (grupo de tamaño 1, item_share_consumo=1.0), el
+    apportion por grupo debe coincidir exactamente con ceil(necesidad_grupo) —
+    cero cambio de comportamiento frente a la fórmula anterior."""
+    df = pd.DataFrame([{
+        'store_code': 'S1', 'grupo_id': 'ITEM_X',
+        'consumo_diario_grupo': 2.0, 'inventario_efectivo_grupo': 1.0,
+        'item_share_consumo': 1.0,
+    }])
+    resultado = _apportion_grupo_targets(df)
+    necesidad = max(0.0, TARGET_DAYS * 2.0 - 1.0)
+    assert int(resultado.iloc[0]) == math.ceil(necesidad)
+
+
+def test_tienda_con_dias_actuales_cero_recibe_prioridad_en_excedente():
+    """Bug de auditoría: cuando `dias_actuales==0` (la tienda MÁS urgente
+    posible dentro de las elegibles de Fase 3), la fórmula de peso anterior
+    (`consumo/dias_act` con `dias_act=0` reemplazado por NaN -> peso 0)
+    le daba peso CERO en vez del mayor peso posible. Con dos tiendas
+    elegibles, la de 0 días debe recibir estrictamente más que la que ya
+    tiene margen (más días), no menos ni cero."""
+    cero_dias = _tienda_post_fase2('CERO', consumo=1.0, inventario_efectivo=0.0,
+                                     item_share_consumo=1.0, cajas_asignadas=0)
+    con_margen = _tienda_post_fase2('MARGEN', consumo=1.0, inventario_efectivo=2.0,
+                                      item_share_consumo=1.0, cajas_asignadas=0)
+    tiendas = pd.DataFrame([cero_dias, con_margen])
+    tiendas_result, remaining, _ = _fase3_individual('X', tiendas, remaining=2)
+
+    assert remaining == 0
+    cero_asig = tiendas_result.loc[tiendas_result['store_code'] == 'CERO', 'cajas_fase3'].iloc[0]
+    margen_asig = tiendas_result.loc[tiendas_result['store_code'] == 'MARGEN', 'cajas_fase3'].iloc[0]
+    assert cero_asig > 0, "La tienda con 0 días actuales no debía quedar en 0 cajas de excedente"
+    assert cero_asig >= margen_asig, (
+        "La tienda con 0 días actuales debía recibir al menos tanto como la que ya tenía margen "
+        f"(CERO={cero_asig}, MARGEN={margen_asig})"
+    )
+
+
+def test_reparto_proporcional_clip_defensivo_ante_pesos_negativos():
+    """Pesos negativos (que no deberían ocurrir si preprocessor.py hace bien
+    su trabajo, pero no hay garantía externa) no deben producir asignaciones
+    negativas ni romper la suma total repartida."""
+    pesos = pd.Series({'A': -5.0, 'B': 3.0, 'C': 2.0})
+    room = pd.Series({'A': 10, 'B': 10, 'C': 10})
+    asignado = _reparto_proporcional(pesos, total=5, room=room)
+    assert (asignado >= 0).all(), "Ninguna tienda debía recibir cajas negativas"
+    assert int(asignado.sum()) == 5
+    assert asignado['A'] == 0, "El peso negativo no debía traducirse en asignación"
+
+
+def test_run_distribution_multi_item_agrega_alertas_de_varios_items():
+    """Con 2+ ítems, cada uno pudiendo generar sus propias alertas (p. ej.
+    residuo sin tiendas elegibles), `run_distribution` debe acumular las
+    alertas de TODOS los ítems, no solo del último procesado."""
+    rows = [
+        {'store_code': 'S1', 'item_code': 'A', 'grupo_id': 'ITEM_A',
+         'consumo_diario': 1.0, 'consumo_diario_grupo': 1.0,
+         'inventario_efectivo': 5.0, 'inventario_efectivo_grupo': 5.0,
+         'dias_proyectados': 5.0, 'dias_proyectados_grupo': 5.0,
+         'item_share_consumo': 1.0, 'cajas_disponibles_cedi': 3,
+         'store_name': 'S1', 'um': 'UND', 'item_desc': 'Producto A'},
+        {'store_code': 'S2', 'item_code': 'B', 'grupo_id': 'ITEM_B',
+         'consumo_diario': 2.0, 'consumo_diario_grupo': 2.0,
+         'inventario_efectivo': 0.0, 'inventario_efectivo_grupo': 0.0,
+         'dias_proyectados': 0.0, 'dias_proyectados_grupo': 0.0,
+         'item_share_consumo': 1.0, 'cajas_disponibles_cedi': 4,
+         'store_name': 'S2', 'um': 'UND', 'item_desc': 'Producto B'},
+    ]
+    df_output, alertas = run_distribution(pd.DataFrame(rows))
+    assert set(df_output['item_code'].unique()) == {'A', 'B'}
+    assert int(df_output['cajas_asignadas'].sum()) == 7
+
+
+def test_run_distribution_skip_silencioso_de_cajas_disponibles_cero():
+    """Un ítem con cajas_disponibles_cedi=0 no debe aparecer en df_output ni
+    generar ninguna alerta (nada que distribuir, no es un error)."""
+    rows = [
+        {'store_code': 'S1', 'item_code': 'SIN_STOCK', 'grupo_id': 'ITEM_SIN_STOCK',
+         'consumo_diario': 1.0, 'consumo_diario_grupo': 1.0,
+         'inventario_efectivo': 0.0, 'inventario_efectivo_grupo': 0.0,
+         'dias_proyectados': 0.0, 'dias_proyectados_grupo': 0.0,
+         'item_share_consumo': 1.0, 'cajas_disponibles_cedi': 0,
+         'store_name': 'S1', 'um': 'UND', 'item_desc': 'Sin stock'},
+    ]
+    df_output, alertas = run_distribution(pd.DataFrame(rows))
+    assert len(df_output) == 0
+    assert alertas == []
+
+
+def test_run_distribution_alertas_extra_se_incluyen_en_resultado():
+    """`alertas_extra` (alertas detectadas aguas arriba en preprocessor.py,
+    p. ej. ítems huérfanos) debe aparecer en el resultado final junto a las
+    que genera run_distribution internamente."""
+    rows = [
+        {'store_code': 'S1', 'item_code': 'A', 'grupo_id': 'ITEM_A',
+         'consumo_diario': 1.0, 'consumo_diario_grupo': 1.0,
+         'inventario_efectivo': 5.0, 'inventario_efectivo_grupo': 5.0,
+         'dias_proyectados': 5.0, 'dias_proyectados_grupo': 5.0,
+         'item_share_consumo': 1.0, 'cajas_disponibles_cedi': 1,
+         'store_name': 'S1', 'um': 'UND', 'item_desc': 'Producto A'},
+    ]
+    alerta_previa = {'tipo': 'CRÍTICO', 'item': 'HUERFANO', 'mensaje': 'Ítem huérfano de prueba'}
+    df_output, alertas = run_distribution(pd.DataFrame(rows), alertas_extra=[alerta_previa])
+    assert alerta_previa in alertas
+
+
+def test_run_distribution_alerta_agregada_sin_match_celes():
+    """Columna `sin_match_celes` marcada en `df_merged` debe generar un único
+    alerta agregado (no uno por fila) con el conteo correcto."""
+    rows = [
+        {'store_code': 'S1', 'item_code': 'A', 'grupo_id': 'ITEM_A',
+         'consumo_diario': 1.0, 'consumo_diario_grupo': 1.0,
+         'inventario_efectivo': 5.0, 'inventario_efectivo_grupo': 5.0,
+         'dias_proyectados': 5.0, 'dias_proyectados_grupo': 5.0,
+         'item_share_consumo': 1.0, 'cajas_disponibles_cedi': 1,
+         'store_name': 'S1', 'um': 'UND', 'item_desc': 'Producto A',
+         'sin_match_celes': True},
+        {'store_code': 'S2', 'item_code': 'A', 'grupo_id': 'ITEM_A',
+         'consumo_diario': 1.0, 'consumo_diario_grupo': 1.0,
+         'inventario_efectivo': 5.0, 'inventario_efectivo_grupo': 5.0,
+         'dias_proyectados': 5.0, 'dias_proyectados_grupo': 5.0,
+         'item_share_consumo': 1.0, 'cajas_disponibles_cedi': 1,
+         'store_name': 'S2', 'um': 'UND', 'item_desc': 'Producto A',
+         'sin_match_celes': False},
+    ]
+    df_output, alertas = run_distribution(pd.DataFrame(rows))
+    agregadas = [a for a in alertas if a.get('combos_sin_match') is not None]
+    assert len(agregadas) == 1, "Debe haber exactamente un alerta agregado de sin_match_celes"
+    assert agregadas[0]['combos_sin_match'] == 1
 
 
 if __name__ == '__main__':
