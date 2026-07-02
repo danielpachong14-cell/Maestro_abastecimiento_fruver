@@ -1,4 +1,4 @@
-# Distribuidor Fruver — Descripción del Proyecto
+# Distribuidor Fruver — Documentación del Proyecto
 
 ## ¿Qué es?
 
@@ -8,65 +8,206 @@ Funciona como una aplicación web liviana: el operador sube seis archivos Excel 
 
 ---
 
-## ¿Cómo funciona?
+## Archivos de entrada (6 Excel obligatorios + 1 opcional)
 
-### Entradas
+| Archivo | Clave interna | Obligatorio | Contenido |
+|---|---|---|---|
+| `Stock.xlsx` | `stock` | Sí | Inventario disponible en el CEDI por ítem (en cajas) |
+| `Celes.xlsx` | `celes` | Sí | Consumos históricos, existencias en tienda e inventario en tránsito |
+| `DB_Portafolio Fruver.xlsx` | `portafolio` | Sí | Catálogo de ítems, usado para alertar ítems nuevos sin catalogar o descontinuados con existencia |
+| `DB_Tiendas.xlsx` | `tiendas` | Sí | Maestro de tiendas activas con sus códigos |
+| `DB_Tiendas Por itmes y portafolio.xlsx` | `tiendas_item` | Sí | Matriz de elegibilidad: qué tiendas pueden recibir qué ítem (fuente de verdad) |
+| `DB_ProductosEspejo.xlsx` | `espejo` | Sí | Agrupa SKUs que son el mismo producto físico bajo distinto código, para no duplicar reposición entre ellos |
+| `Tiendas_No generar pedido.xlsx` | `excluidas` | No | Tiendas a excluir de una corrida puntual |
 
-La herramienta recibe seis archivos Excel obligatorios (más uno opcional) que ya existen en los procesos del negocio:
+### Qué campo se usa de cada archivo
 
-| Archivo | Contenido |
+**Stock (Siesa)**
+
+| Campo | Uso |
 |---|---|
-| **Stock CEDI (Siesa)** | Inventario disponible en el CEDI por ítem (en cajas) |
-| **Celes** | Consumos históricos, existencias en tienda e inventario en tránsito |
-| **Portafolio Fruver** | Catálogo de ítems, usado para alertar ítems nuevos sin catalogar o descontinuados con existencia |
-| **Base de Tiendas** | Maestro de tiendas activas con sus códigos |
-| **Tiendas × Ítem** | Matriz de elegibilidad: qué tiendas pueden recibir qué ítem |
-| **Productos Espejo** | Agrupa SKUs que son el mismo producto físico bajo distinto código, para no duplicar reposición entre ellos |
-| **Tiendas sin pedido** *(opcional)* | Tiendas a excluir de una corrida puntual |
+| `Item` | Código del ítem (texto con ceros: `"0000155"` → se normaliza a entero `155`) |
+| `Desc. item` | Nombre del ítem |
+| `Cant. disponible` | Cajas disponibles en el CEDI *(ya en cajas, no se divide por Factor U.M.)* |
+| `U.M.` | Unidad de medida — solo para el output, no para cálculos |
+| `ESTADO DEL PRODUCTO` | NO filtra la distribución (decisión de negocio: toda existencia física se envía sin importar el estado) — si no es `ACTIVO`, genera una alerta informativa no bloqueante |
 
-### Proceso interno
+**Celes**
+
+| Campo | Uso |
+|---|---|
+| `Código de Bodega` | Código de tienda con prefijo `BO` (`BOS03` → se normaliza a `S03`) |
+| `Nombre de Bodega` | Nombre de la tienda |
+| `Código de Producto` | Código del ítem |
+| `Consumo Diario (Unidades de Distribución)` | Cajas vendidas por día |
+| `(=) Días de Inventario Actuales` | Días de stock actuales |
+| `Inventario Disponible en esta Tienda` | Cajas físicas en tienda |
+| `(-) inventario de traslado en proceso` | Cajas en tránsito hacia la tienda |
+| `UM` | Unidad de medida desde Celes |
+
+**Portafolio Fruver**
+
+| Campo | Uso |
+|---|---|
+| `ITEM` | Código de ítem — catálogo completo para validación cruzada |
+| `ESTADO` | `ACTIVO` / no-activo — cruza contra Stock para alertar ítems nuevos sin catalogar o descontinuados con existencia |
+
+> No participa en el cálculo de cajas ni en la elegibilidad tienda-ítem (esa viene de Tiendas × Ítem). `CLUSTERIZACIÓN` no se usa todavía en el cálculo.
+
+**Tiendas × Ítem**
+
+| Campo | Uso |
+|---|---|
+| `COD SIESA` | Código tienda |
+| `DB_Portafolio_Fruver.ITEM` | Código ítem |
+| `DB_Portafolio_Fruver.ESTADO` | Se filtra solo `ACTIVO` |
+
+> **Fuente de verdad de elegibilidad**: determina qué tienda puede recibir qué ítem.
+
+**Productos Espejo**
+
+| Campo | Uso |
+|---|---|
+| `grupo_id` | Identificador del grupo de productos espejo |
+| `item_id` | Código de ítem que pertenece a ese grupo |
+
+> Agrupa SKUs que son el mismo producto físico bajo distinto código — compiten por la misma demanda en tienda y no deben duplicar reposición/excedente entre sí. Un ítem sin entrada aquí queda en un grupo de tamaño 1 (comportamiento idéntico al de un ítem sin espejo).
+
+**Base de Tiendas**
+
+| Campo | Uso |
+|---|---|
+| `COD SIESA` | Clave de cruce con el resto del pipeline |
+| `NOMBRE DE LA TIENDA` | Respaldo del nombre de tienda cuando no hay match en Celes |
+| `ZONA` | Zona geográfica de la tienda — se incluye en el output |
+
+**Tiendas sin pedido** *(opcional)*
+
+| Campo | Uso |
+|---|---|
+| `Centro Operacional de la Bodega` | Lista de COD SIESA que se excluyen completamente de la distribución en esa ejecución |
+
+---
+
+## Cómo funciona
 
 ```
 6+1 Excel → carga y validación → normalización → algoritmo de distribución → archivo de pedidos
 ```
 
 1. **Carga y validación** — verifica que cada archivo tenga las columnas requeridas y alerta si falta algo antes de procesar.
-2. **Normalización** — resuelve automáticamente las diferencias de codificación entre los archivos (ej. el stock usa `'0000155'` como texto, mientras los otros usan `155` como número; Celes usa `BOS03` mientras la base de tiendas usa `S03`; los estados tipo `'001 - ACTIVO'` se comparan exactos, no por contención de texto).
+2. **Normalización** — resuelve automáticamente las diferencias de codificación entre los archivos (ej. el stock usa `'0000155'` como texto, mientras los otros usan `155` como número; Celes usa `BOS03` mientras la base de tiendas usa `S03`; los estados tipo `'001 - ACTIVO'` se comparan por el último segmento tras el guion, exacto — no por contención de texto, porque `'INACTIVO'` también contiene la subcadena `'ACTIVO'`).
 3. **Distribución** — el motor asigna las cajas disponibles priorizando las tiendas con mayor urgencia y garantizando que el inventario del CEDI quede en cero.
 4. **Exportación** — genera el Excel de salida con cinco hojas: Distribución, Resumen, Resumen Ítems, Análisis Comprador y Alertas.
 
+### Cálculos del preprocesamiento
+
+```
+inventario_efectivo = inventario_tienda + inventario_transito
+dias_proyectados    = inventario_efectivo / consumo_diario      (= ∞ si consumo_diario == 0)
+cajas_necesarias    = ceil( max(0, TARGET_DAYS × consumo_diario − inventario_efectivo) )
+```
+
 ### Lógica de prioridades
 
-Cada tienda recibe cajas según su nivel de urgencia:
+Cada tienda recibe cajas según su nivel de urgencia (calculado sobre el inventario/consumo del **grupo de producto espejo**, no del ítem individual — para un ítem sin espejo son idénticos):
 
 | Prioridad | Condición | Acción |
 |---|---|---|
-| **AGOTADA** | Inventario efectivo < 0.3 cajas | Recibe primero, mínimo 1 caja |
-| **STOCK DE SEGURIDAD** | Inventario efectivo < 0.6 cajas | Segunda en recibir, mínimo 1 caja |
-| **REPOSICIÓN** | Menos de 3 días de inventario proyectado | Recibe cajas para llegar al objetivo |
-| **CUBIERTA** | 3 o más días de inventario proyectado | Solo recibe si queda sobrante |
+| **AGOTADA** | Inventario efectivo de grupo < 0.3 cajas | Recibe primero, mínimo 1 caja |
+| **STOCK DE SEGURIDAD** | Inventario efectivo de grupo < 0.6 cajas | Segunda en recibir, mínimo 1 caja |
+| **REPOSICIÓN** | Menos de 3 días de inventario proyectado de grupo | Recibe cajas para llegar al objetivo |
+| **CUBIERTA** | 3 o más días de inventario proyectado de grupo | Solo recibe si queda sobrante |
 
 El inventario proyectado considera tanto las existencias físicas en tienda como el inventario ya en tránsito, evitando sobre-abastecimiento.
 
+### Las tres fases de reparto
+
+Dentro de cada ítem, las tiendas elegibles se ordenan por prioridad descendente y consumo descendente, y se reparten en tres fases secuenciales con alcance de negocio distinto:
+
+**Fase 1 — Rondas crecientes (cap 1 → `MIN_CAJAS_INICIAL`)**
+Todas las tiendas elegibles reciben su 1.ª caja antes de que cualquiera reciba su 2.ª. Evita que tiendas de alto consumo acaparen el stock cuando hay múltiples tiendas agotadas.
+
+**Fase 2 — Proporcional a `TARGET_DAYS`**
+Si el stock no alcanza para llevar a todas las tiendas a 3 días, la escasez se reparte proporcionalmente a la necesidad de cada una (`floor` + corrección Hamilton para el residuo entero). Para ítems que comparten grupo de producto espejo, la necesidad se calcula UNA VEZ por grupo y se reparte entre sus SKUs — no se redondea hacia arriba (`ceil`) por ítem por separado, porque eso sobreprovisiona el CEDI.
+
+**Fase 3 — Sobrante ponderado por días**
+Si quedan cajas tras cubrir 3 días en todas las tiendas, se reparten por rondas proporcional a `consumo_diario / días_actuales` (no "1 en 1" ni por consumo a secas) entre las tiendas elegibles, siempre que estén bajo `TOPE_EXCEDENTE = 6` días proyectados tras recibir. Esto reparte DÍAS de forma pareja, no cajas — repartir la misma cantidad de cajas entre tiendas de consumo muy distinto da días muy distintos por caja. Si todas las tiendas elegibles llegan al tope, un "Paso B" de cero-residuo reparte lo que quede por menor `días_actuales`, ignorando el tope de cajas por entrega — la garantía de cero residuo tiene prioridad.
+
+### Restricciones absolutas
+
+| Restricción | Detalle |
+|---|---|
+| Solo cajas completas | `Pedido Final` siempre es entero — nunca fracciones |
+| Tope por tienda-ítem | Máximo 3 cajas por tienda-ítem (salvo el fallback de cero residuo) |
+| Tiendas sin consumo | Solo reciben si están en prioridad AGOTADA o SAFETY |
+| Cero residuo | El sobrante final se vacía en round-robin sobre tiendas con `consumo_diario > 0` |
+| Sin efectos secundarios | Ningún módulo escribe a disco; solo `run.py` y el botón de descarga de la UI persisten archivos |
+
 ### Garantía de distribución total
 
-El algoritmo tiene una regla no negociable: **la suma de cajas asignadas a todas las tiendas debe ser igual al 100% de las cajas disponibles en el CEDI**. Si algún ítem no puede distribuirse completamente (por ejemplo, porque no tiene tiendas elegibles), la herramienta genera una alerta crítica visible.
+El algoritmo tiene una regla no negociable: **la suma de cajas asignadas a todas las tiendas debe ser igual al 100% de las cajas disponibles en el CEDI**, para cada ítem que llegue a tener al menos una tienda elegible. La validación ocurre en tres capas:
 
-### Archivo de salida
+1. **Durante la distribución**: si tras las 3 fases queda residuo, se genera una alerta `CRÍTICO` (solo ocurre si un ítem no tiene ninguna tienda elegible en Celes).
+2. **En el output**: la hoja **Alertas** (una fila por problema, ordenadas por severidad, o `"OK — Sin alertas"`) y la métrica "Cajas sin distribuir" en la UI.
+3. **Calidad de datos aguas arriba** (`preprocessor.py`): combinaciones tienda-ítem sin match en Celes, ítems huérfanos con stock pero sin tienda elegible, filas descartadas por código no normalizable, e ítems nuevos o descontinuados detectados por validación cruzada contra Portafolio Fruver.
 
-`distribucion_fruver_YYYYMMDD.xlsx`, hoja principal **Distribución** (columnas
-más relevantes; hay más columnas de contexto como Nombre Tienda, Zona, Consumo
-Diario y días de inventario antes/después):
+El algoritmo es completamente determinista: ejecutarlo varias veces con los mismos archivos produce exactamente el mismo output.
+
+### Parámetros del algoritmo
+
+Ubicados en `distribuidor-fruver/core/algorithm.py` (fuente de verdad si este documento queda desactualizado):
+
+| Parámetro | Valor actual | Descripción |
+|---|---|---|
+| `TARGET_DAYS` | `3.0` | Días de inventario objetivo por tienda |
+| `MIN_STOCK_AGOTADO` | `0.3` | Umbral de stock (cajas) para clasificar como AGOTADA |
+| `MIN_STOCK_SAFETY` | `0.6` | Umbral de stock (cajas) para clasificar como SAFETY |
+| `MIN_CAJAS_INICIAL` | `2` | Cap máximo de la Fase 1 (rondas hasta cap 2) |
+| `MAX_CAJAS_POR_ITEM` | `3` | Tope duro de cajas por tienda-ítem |
+| `TOPE_EXCEDENTE` | `6` | Días máximos que puede acumular una tienda del sobrante |
+| `UMBRAL_CONCENTRACION_SIN_CONSUMO` | `5` | Cajas a partir de las cuales se activa reparto equitativo en vez de concentrar en una sola tienda por falta de datos de consumo |
+
+---
+
+## Archivo de salida
+
+`distribucion_fruver_YYYYMMDD.xlsx`, con **cinco hojas**: Distribución, Resumen, Resumen Ítems, Análisis Comprador y Alertas.
+
+### Hoja "Distribución"
+
+El pedido ejecutable, ordenado por tienda y luego por ítem.
 
 | Columna | Contenido |
 |---|---|
-| Centro Operacional de la Bodega | Código de la tienda destino |
-| Código de Producto | Código del ítem |
-| UM | Unidad de medida (referencia) |
-| Pedido Final | Cajas completas a enviar (siempre entero) |
+| Centro Operacional de la Bodega | COD SIESA de la tienda destino (ej. `S03`) |
+| Nombre Tienda | Nombre de la tienda |
+| Zona | Zona geográfica de la tienda |
+| Código de Producto | Código del ítem (entero) |
+| Nombre Ítem | Descripción del ítem |
+| UM | Unidad de medida (referencia, ej. `CJ20`) |
+| Consumo Diario | Cajas/día de esa tienda |
+| Stock Antes Pedido | Inventario efectivo antes del pedido |
+| Días Inventario Actual | Días de stock antes del pedido |
+| **Pedido Final** | **Cajas completas a enviar (siempre entero)** |
+| Stock Después Pedido | Inventario efectivo tras recibir el pedido |
+| Días Inventario Proyectado | Días de stock proyectados después del pedido |
 
-El archivo trae además las hojas Resumen, Resumen Ítems, Análisis Comprador y
-Alertas — ver detalle en `Resumen_Sistema_Distribuidor_Fruver.md`.
+### Hoja "Resumen"
+
+Total de cajas por tienda, ordenado de mayor a menor. Incluye COD SIESA, Nombre Tienda, Zona y Total Cajas.
+
+### Hoja "Resumen Ítems"
+
+Total de cajas por ítem, desglosado por Fase 1 / Fase 2 / Fase 3, con notas explicativas de cada fase en las primeras filas.
+
+### Hoja "Análisis Comprador"
+
+Por ítem, compara las cajas disponibles en CEDI contra el mínimo necesario para cubrir `TARGET_DAYS` en todas las tiendas, y clasifica el nivel de riesgo de sobre-compra para orientar la próxima decisión de compra. Incluye el riesgo de merma por ítem (`# Tiendas con Riesgo Merma` / `% Tiendas con Riesgo`, contra el umbral `min(10, vida_útil)`) — el detalle tienda-ítem vivía antes en una hoja aparte ("Riesgo Merma"), que se quitó a pedido del usuario.
+
+### Hoja "Alertas"
+
+Todos los casos borde detectados durante el procesamiento (algoritmo y preprocesamiento), ordenados por severidad. Si todo va bien, muestra `"OK — Sin alertas"`.
 
 ---
 
