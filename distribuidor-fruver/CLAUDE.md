@@ -298,3 +298,15 @@ Análisis Comprador.
    del Excel de salida, además de mostrarse en la UI de Streamlit o en la
    consola de `run.py` (no se escribe ningún archivo de log adicional en
    `Output/` — decisión explícita del usuario).
+
+## Nota operativa: determinismo asume `Input/` estático durante la corrida
+
+El pipeline es determinista dado un mismo conjunto de archivos, pero **no
+congela una copia de `Input/` al iniciar** — si `Stock.xlsx`, `Celes.xlsx` u
+otro archivo se edita mientras una corrida está en curso, o entre dos
+corridas sucesivas, el resultado cambia porque cambiaron los datos de
+origen. Confirmado durante la investigación de un reporte de
+sobre-concentración en una tienda (SE9): entre dos ejecuciones consecutivas
+el stock de un ítem había cambiado (31→40 cajas) porque el archivo se
+estaba editando en paralelo — no había ningún bug en el algoritmo. Tratar
+`Input/` como solo lectura mientras haya una corrida en curso.

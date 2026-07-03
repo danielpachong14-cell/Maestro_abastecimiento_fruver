@@ -152,7 +152,7 @@ El algoritmo tiene una regla no negociable: **la suma de cajas asignadas a todas
 2. **En el output**: la hoja **Alertas** (una fila por problema, ordenadas por severidad, o `"OK — Sin alertas"`) y la métrica "Cajas sin distribuir" en la UI.
 3. **Calidad de datos aguas arriba** (`preprocessor.py`): combinaciones tienda-ítem sin match en Celes, ítems huérfanos con stock pero sin tienda elegible, filas descartadas por código no normalizable, e ítems nuevos o descontinuados detectados por validación cruzada contra Portafolio Fruver.
 
-El algoritmo es completamente determinista: ejecutarlo varias veces con los mismos archivos produce exactamente el mismo output.
+El algoritmo es completamente determinista: ejecutarlo varias veces con los mismos archivos produce exactamente el mismo output. Esto asume que los archivos de `Input/` no cambian entre ejecuciones — si el Stock, Celes u otro archivo se edita mientras una corrida está en curso (o entre una corrida y la siguiente), el resultado sí cambia, porque cambiaron los datos de origen, no porque el algoritmo haya dejado de ser determinista.
 
 ### Parámetros del algoritmo
 
