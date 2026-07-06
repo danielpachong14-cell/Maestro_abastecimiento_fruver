@@ -280,6 +280,17 @@ por ítem, incluidas columnas de riesgo de merma — `# Tiendas con Riesgo Merma
 **Alertas** (todos los casos borde detectados, ordenados por severidad;
 `"OK — Sin alertas"` si no hubo ninguna).
 
+**Análisis Comprador** también incluye `# Tiendas con Riesgo Sobrestock (Xd)` /
+`% Tiendas con Riesgo Sobrestock`, calculadas contra `UMBRAL_RIESGO_SOBRESTOCK`
+(`core/exporter.py`, valor actual: 10 días). Este umbral es **exclusivo del
+reporte** y está desacoplado a propósito de `TOPE_EXCEDENTE` (`core/algorithm.py`,
+valor actual: 6 días) — el tope real que usa el algoritmo en Fase 3 para dejar
+de asignarle más sobrante a una tienda. Cambiar `UMBRAL_RIESGO_SOBRESTOCK` solo
+afecta esta columna de evaluación de riesgo; no cambia una sola caja de lo que
+se despacha. Decisión explícita del usuario (auditoría 2026-07): quería subir el
+umbral de evaluación de riesgo de sobre-stock/merma de 6 a 10 días sin alterar
+el comportamiento real de distribución.
+
 La hoja **Riesgo Merma** (detalle tienda-ítem del mismo cálculo) existió hasta
 que se quitó a pedido del usuario — el resumen por ítem sigue disponible en
 Análisis Comprador.

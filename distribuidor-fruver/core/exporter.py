@@ -21,11 +21,18 @@ from openpyxl.styles import Alignment, Font, PatternFill
 
 from .algorithm import MIN_CAJAS_INICIAL, TARGET_DAYS, TOPE_EXCEDENTE
 
+# Umbral de riesgo de sobre-stock para "Análisis Comprador" — uso exclusivo de
+# reporte, independiente del TOPE_EXCEDENTE real que usa el algoritmo en Fase 3
+# (ver algorithm.py) para limitar el reparto del sobrante. Permite evaluar
+# distintos escenarios de riesgo de sobre-stock/merma sin alterar lo que
+# efectivamente se despacha.
+UMBRAL_RIESGO_SOBRESTOCK = 10
+
 HEADER_FILL = PatternFill("solid", fgColor="2D6A4F")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 HEADER_ALIGN = Alignment(horizontal='center')
 
-# Semáforo para '# / % Tiendas > Tope Excedente': mismos cortes que _nivel
+# Semáforo para '# / % Tiendas con Riesgo Sobrestock': mismos cortes que _nivel
 # (>=50% alto, >=20% medio, >0 bajo, 0 ok) para que el color sea consistente
 # con la clasificación de 'Nivel de Riesgo'.
 _FILL_TOPE_ALTO  = PatternFill("solid", fgColor="F4A6A6")  # rojo claro
@@ -33,11 +40,13 @@ _FILL_TOPE_MEDIO = PatternFill("solid", fgColor="FBE0A6")  # naranja claro
 _FILL_TOPE_BAJO  = PatternFill("solid", fgColor="FFF6B3")  # amarillo claro
 _FILL_TOPE_OK    = PatternFill("solid", fgColor="D4EDDA")  # verde claro
 
-_TOPE_DESCRIPCION = (
+_SOBRESTOCK_DESCRIPCION = (
     '% de tiendas activas del ítem cuyo inventario proyectado tras el pedido '
-    'supera el tope de excedente que el propio algoritmo usa para limitar el '
-    'reparto del sobrante ({tope} días). A más alto el porcentaje, más cajas '
-    'quedarían acumuladas en tienda por encima de ese límite.\n\n'
+    'supera un umbral de evaluación de riesgo de sobre-stock ({umbral} días), '
+    'independiente del tope que el algoritmo usa internamente para limitar el '
+    'reparto del sobrante en Fase 3 ({tope_algoritmo} días) — este umbral es solo '
+    'para el reporte, no cambia las cajas despachadas. A más alto el porcentaje, '
+    'más tiendas quedarían con inventario proyectado por encima de ese umbral.\n\n'
     'Verde = 0% · Amarillo = bajo (>0%) · Naranja = medio (≥20%) · Rojo = alto (≥50%).'
 )
 
@@ -58,13 +67,15 @@ def _autofit(ws):
         ws.column_dimensions[col[0].column_letter].width = min(max_len, 50)
 
 
-def _resaltar_tope_excedente(ws, comprador_out):
-    """Colorea '# / % Tiendas > Tope Excedente' por severidad y describe el
-    análisis en un comentario sobre el encabezado de la columna de porcentaje."""
-    col_n   = comprador_out.columns.get_loc(f'# Tiendas > Tope Excedente ({TOPE_EXCEDENTE}d)') + 1
-    col_pct = comprador_out.columns.get_loc('% Tiendas > Tope Excedente') + 1
+def _resaltar_riesgo_sobrestock(ws, comprador_out):
+    """Colorea '# / % Tiendas con Riesgo Sobrestock' por severidad y describe
+    el análisis en un comentario sobre el encabezado de la columna de porcentaje."""
+    col_n   = comprador_out.columns.get_loc(
+        f'# Tiendas con Riesgo Sobrestock ({UMBRAL_RIESGO_SOBRESTOCK}d)'
+    ) + 1
+    col_pct = comprador_out.columns.get_loc('% Tiendas con Riesgo Sobrestock') + 1
 
-    for row_idx, pct in enumerate(comprador_out['% Tiendas > Tope Excedente'], start=2):
+    for row_idx, pct in enumerate(comprador_out['% Tiendas con Riesgo Sobrestock'], start=2):
         if pct >= 50:
             fill = _FILL_TOPE_ALTO
         elif pct >= 20:
@@ -76,7 +87,10 @@ def _resaltar_tope_excedente(ws, comprador_out):
         ws.cell(row=row_idx, column=col_n).fill = fill
         ws.cell(row=row_idx, column=col_pct).fill = fill
 
-    comentario = Comment(_TOPE_DESCRIPCION.format(tope=TOPE_EXCEDENTE), 'Distribuidor Fruver')
+    comentario = Comment(
+        _SOBRESTOCK_DESCRIPCION.format(umbral=UMBRAL_RIESGO_SOBRESTOCK, tope_algoritmo=TOPE_EXCEDENTE),
+        'Distribuidor Fruver',
+    )
     comentario.width = 320
     comentario.height = 140
     ws.cell(row=1, column=col_pct).comment = comentario
@@ -207,7 +221,7 @@ def generate_excel(df_output, alertas=None, df_merged=None):
         'Código Ítem', 'Nombre Ítem', 'Cajas CEDI', '# Tiendas Activas',
         'Cajas Necesarias (3 días)', 'Exceso en CEDI (Cj)', '% Reducción Posible',
         '# Tiendas con Riesgo Merma', '% Tiendas con Riesgo',
-        f'# Tiendas > Tope Excedente ({TOPE_EXCEDENTE}d)', '% Tiendas > Tope Excedente',
+        f'# Tiendas con Riesgo Sobrestock ({UMBRAL_RIESGO_SOBRESTOCK}d)', '% Tiendas con Riesgo Sobrestock',
         'Exceso Cajas Est. Total', 'Nivel de Riesgo', 'Recomendación Compra',
     ]
     if has_data and df_merged is not None:
@@ -241,11 +255,12 @@ def generate_excel(df_output, alertas=None, df_merged=None):
             ((d['_dias_despues'] - d['_umbral']) * d['consumo_diario']).clip(lower=0),
             d['cajas_asignadas'].astype(float),
         )
-        # Mismo chequeo que _is_merma, pero contra TOPE_EXCEDENTE (días) en vez del
-        # umbral por vida útil — identifica tiendas-ítem que quedan por encima del
-        # tope que el propio algoritmo usa para limitar el reparto del sobrante.
+        # Mismo chequeo que _is_merma, pero contra UMBRAL_RIESGO_SOBRESTOCK (días)
+        # en vez del umbral por vida útil — identifica tiendas-ítem con inventario
+        # proyectado por encima de ese umbral de evaluación de riesgo, independiente
+        # del tope real que el algoritmo usa en Fase 3 (TOPE_EXCEDENTE).
         d['_excede_tope'] = (
-            (d['_dias_despues'].notna() & (d['_dias_despues'] > TOPE_EXCEDENTE))
+            (d['_dias_despues'].notna() & (d['_dias_despues'] > UMBRAL_RIESGO_SOBRESTOCK))
             | (d['_dias_despues'].isna() & (d['cajas_asignadas'] > 0))
         ).astype(int)
 
@@ -296,8 +311,8 @@ def generate_excel(df_output, alertas=None, df_merged=None):
             '% Reducción Posible':        cb['pct_reduccion'],
             '# Tiendas con Riesgo Merma': cb['n_tiendas_merma'],
             '% Tiendas con Riesgo':       cb['pct_tiendas_merma'],
-            f'# Tiendas > Tope Excedente ({TOPE_EXCEDENTE}d)': cb['n_tiendas_tope'],
-            '% Tiendas > Tope Excedente': cb['pct_tiendas_tope'],
+            f'# Tiendas con Riesgo Sobrestock ({UMBRAL_RIESGO_SOBRESTOCK}d)': cb['n_tiendas_tope'],
+            '% Tiendas con Riesgo Sobrestock': cb['pct_tiendas_tope'],
             'Exceso Cajas Est. Total':    cb['exceso_cajas_total'],
             'Nivel de Riesgo':            cb['Nivel de Riesgo'],
         })
@@ -353,7 +368,7 @@ def generate_excel(df_output, alertas=None, df_merged=None):
             ws_cb = writer.sheets['Análisis Comprador']
             _style_header(ws_cb)
             _autofit(ws_cb)
-            _resaltar_tope_excedente(ws_cb, comprador_out)
+            _resaltar_riesgo_sobrestock(ws_cb, comprador_out)
 
         # Encabezado de "Resumen Ítems" desplazado por las notas (fila 5 en Excel).
         for cell in ws_ri[5]:

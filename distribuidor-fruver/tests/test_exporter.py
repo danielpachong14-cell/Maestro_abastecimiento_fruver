@@ -157,6 +157,31 @@ def test_hoja_riesgo_merma_ya_no_se_genera():
     assert int(comprador.loc[0, '# Tiendas con Riesgo Merma']) == 0
 
 
+def test_riesgo_sobrestock_usa_umbral_propio_desacoplado_del_algoritmo():
+    """UMBRAL_RIESGO_SOBRESTOCK (10 días, exporter.py) es un umbral de reporte
+    independiente de TOPE_EXCEDENTE (6 días, algorithm.py) — el tope real que
+    usa el algoritmo en Fase 3 para dejar de asignar más sobrante a una
+    tienda. Una tienda con 8 días proyectados tras el pedido ya superaría el
+    tope real del algoritmo, pero NO debe marcarse en '# Tiendas con Riesgo
+    Sobrestock' porque sigue por debajo del umbral de reporte (10 días) —
+    prueba que el reporte quedó desacoplado del comportamiento real."""
+    df_output = pd.DataFrame([
+        _row(1, 'Producto A', 'S01', consumo=1.0, existencias=0.0, cajas_asignadas=8, cajas_cedi=20),
+        _row(1, 'Producto A', 'S02', consumo=1.0, existencias=0.0, cajas_asignadas=12, cajas_cedi=20),
+    ])
+    df_merged = df_output.copy()
+    excel_bytes = generate_excel(df_output, alertas=[], df_merged=df_merged)
+    comprador = pd.read_excel(io.BytesIO(excel_bytes), sheet_name='Análisis Comprador')
+
+    col_conteo = [c for c in comprador.columns if c.startswith('# Tiendas con Riesgo Sobrestock')]
+    assert col_conteo == ['# Tiendas con Riesgo Sobrestock (10d)'], list(comprador.columns)
+
+    fila = comprador[comprador['Código Ítem'] == 1].iloc[0]
+    # Solo S02 (12 días > 10) cuenta; S01 (8 días) queda fuera aunque supere
+    # el tope real del algoritmo (6 días).
+    assert int(fila['# Tiendas con Riesgo Sobrestock (10d)']) == 1
+
+
 def test_generate_excel_has_data_false_no_rompe():
     """df_output vacío/None no debe lanzar excepción; cada hoja debe quedar
     con sus columnas esperadas pero sin filas."""
