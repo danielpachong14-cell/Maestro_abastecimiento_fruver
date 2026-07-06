@@ -112,8 +112,8 @@ la distribución):
 
 ```python
 TARGET_DAYS       = 3.0   # días MÍNIMOS de inventario proyectado objetivo por tienda
-MIN_STOCK_AGOTADO = 0.3   # inventario_efectivo < 0.3 cajas → AGOTADA (prioridad máxima)
-MIN_STOCK_SAFETY  = 0.6   # inventario_efectivo < 0.6 cajas → STOCK SEGURIDAD
+MIN_STOCK_AGOTADO = 0.2   # inventario_efectivo < 0.2 cajas → AGOTADA (prioridad máxima)
+MIN_STOCK_SAFETY  = 0.5   # inventario_efectivo < 0.5 cajas → STOCK SEGURIDAD
 MIN_CAJAS_INICIAL = 2     # número de rondas (cap 1, 2) en Fase 1 — el nombre viene de
                           # versiones anteriores; hoy es el cap MÁXIMO por ronda, no un mínimo
 MAX_CAJAS_POR_ITEM = 3    # tope duro: máximo que una tienda recibe por ítem (todas las fases)
@@ -164,8 +164,8 @@ sin espejo). Afecta tres partes del algoritmo:
 ## Lógica de prioridades
 
 ```
-Priority 3 (AGOTADO):      inventario_efectivo_grupo < 0.3 cajas → mínimo 1 caja, primera en recibir
-Priority 2 (SAFETY):       inventario_efectivo_grupo < 0.6 cajas → mínimo 1 caja
+Priority 3 (AGOTADO):      inventario_efectivo_grupo < 0.2 cajas → mínimo 1 caja, primera en recibir
+Priority 2 (SAFETY):       inventario_efectivo_grupo < 0.5 cajas → mínimo 1 caja
 Priority 1 (REPOSICIÓN):   dias_proyectados_grupo    < 3.0       → cajas para llegar a 3 días
 Priority 0 (CUBIERTO):     dias_proyectados_grupo    ≥ 3.0       → solo recibe si sobra inventario
 ```

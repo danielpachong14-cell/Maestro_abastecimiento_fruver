@@ -61,8 +61,8 @@ import numpy as np
 import pandas as pd
 
 TARGET_DAYS = 3.0           # días objetivo de inventario proyectado por tienda
-MIN_STOCK_AGOTADO = 0.3     # por debajo de este STOCK (unidades) = AGOTADA
-MIN_STOCK_SAFETY = 0.6      # por debajo de este STOCK (unidades) = STOCK SEGURIDAD
+MIN_STOCK_AGOTADO = 0.2     # por debajo de este STOCK (unidades) = AGOTADA
+MIN_STOCK_SAFETY = 0.5      # por debajo de este STOCK (unidades) = STOCK SEGURIDAD
 MIN_CAJAS_INICIAL = 2       # cap de cajas por tienda en Fase 1 (por ronda)
 MAX_CAJAS_POR_ITEM = 3      # tope duro: máximo que una tienda recibe por ítem (todas las fases)
 TOPE_EXCEDENTE = 6       # máximo días que puede acumular una tienda del excedente

@@ -2,7 +2,7 @@
 
 ## ¿Qué es?
 
-El **Distribuidor Fruver** es una herramienta interna desarrollada por Isimo que automatiza la distribución del inventario de productos Fruver desde el CEDI hacia las tiendas activas de la cadena.
+El **Distribuidor Fruver** es una herramienta interna desarrollada para Isimo que automatiza la distribución del inventario de productos Fruver desde el CEDI hacia las tiendas activas de la cadena.
 
 Funciona como una aplicación web liviana: el operador sube seis archivos Excel (y un séptimo opcional), presiona un botón y en segundos descarga el archivo de pedidos listo para ejecutarse en el sistema, con el 100% del inventario disponible repartido entre las tiendas.
 
@@ -114,8 +114,8 @@ Cada tienda recibe cajas según su nivel de urgencia (calculado sobre el inventa
 
 | Prioridad | Condición | Acción |
 |---|---|---|
-| **AGOTADA** | Inventario efectivo de grupo < 0.3 cajas | Recibe primero, mínimo 1 caja |
-| **STOCK DE SEGURIDAD** | Inventario efectivo de grupo < 0.6 cajas | Segunda en recibir, mínimo 1 caja |
+| **AGOTADA** | Inventario efectivo de grupo < 0.2 cajas | Recibe primero, mínimo 1 caja |
+| **STOCK DE SEGURIDAD** | Inventario efectivo de grupo < 0.5 cajas | Segunda en recibir, mínimo 1 caja |
 | **REPOSICIÓN** | Menos de 3 días de inventario proyectado de grupo | Recibe cajas para llegar al objetivo |
 | **CUBIERTA** | 3 o más días de inventario proyectado de grupo | Solo recibe si queda sobrante |
 
@@ -161,12 +161,13 @@ Ubicados en `distribuidor-fruver/core/algorithm.py` (fuente de verdad si este do
 | Parámetro | Valor actual | Descripción |
 |---|---|---|
 | `TARGET_DAYS` | `3.0` | Días de inventario objetivo por tienda |
-| `MIN_STOCK_AGOTADO` | `0.3` | Umbral de stock (cajas) para clasificar como AGOTADA |
-| `MIN_STOCK_SAFETY` | `0.6` | Umbral de stock (cajas) para clasificar como SAFETY |
+| `MIN_STOCK_AGOTADO` | `0.2` | Umbral de stock (cajas) para clasificar como AGOTADA |
+| `MIN_STOCK_SAFETY` | `0.5` | Umbral de stock (cajas) para clasificar como SAFETY |
 | `MIN_CAJAS_INICIAL` | `2` | Cap máximo de la Fase 1 (rondas hasta cap 2) |
 | `MAX_CAJAS_POR_ITEM` | `3` | Tope duro de cajas por tienda-ítem |
-| `TOPE_EXCEDENTE` | `6` | Días máximos que puede acumular una tienda del sobrante |
+| `TOPE_EXCEDENTE` | `6` | Días máximos que puede acumular una tienda del sobrante (algoritmo real, `core/algorithm.py`) |
 | `UMBRAL_CONCENTRACION_SIN_CONSUMO` | `5` | Cajas a partir de las cuales se activa reparto equitativo en vez de concentrar en una sola tienda por falta de datos de consumo |
+| `UMBRAL_RIESGO_SOBRESTOCK` | `10` | Umbral de días para marcar riesgo de sobre-stock en "Análisis Comprador" (`core/exporter.py`) — **solo de reporte**, independiente de `TOPE_EXCEDENTE`; cambiarlo no altera las cajas despachadas |
 
 ---
 
@@ -204,6 +205,8 @@ Total de cajas por ítem, desglosado por Fase 1 / Fase 2 / Fase 3, con notas exp
 ### Hoja "Análisis Comprador"
 
 Por ítem, compara las cajas disponibles en CEDI contra el mínimo necesario para cubrir `TARGET_DAYS` en todas las tiendas, y clasifica el nivel de riesgo de sobre-compra para orientar la próxima decisión de compra. Incluye el riesgo de merma por ítem (`# Tiendas con Riesgo Merma` / `% Tiendas con Riesgo`, contra el umbral `min(10, vida_útil)`) — el detalle tienda-ítem vivía antes en una hoja aparte ("Riesgo Merma"), que se quitó a pedido del usuario.
+
+También incluye `# Tiendas con Riesgo Sobrestock` / `% Tiendas con Riesgo Sobrestock`, contra `UMBRAL_RIESGO_SOBRESTOCK` (10 días) — un umbral de evaluación de riesgo independiente de `TOPE_EXCEDENTE` (el tope real que usa el algoritmo en Fase 3). Se desacoplaron a propósito (auditoría 2026-07) para poder subir el umbral de evaluación de riesgo sin cambiar el comportamiento real de distribución.
 
 ### Hoja "Alertas"
 
