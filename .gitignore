@@ -5,10 +5,15 @@
 # Temporales de Office
 ~$*
 
-# Python
-distribuidor-fruver/venv/
-distribuidor-fruver/__pycache__/
-distribuidor-fruver/**/__pycache__/
-*.pyc
-distribuidor-fruver/.pytest_cache/
+# Python (distribuidor-fruver/ trae su propio .gitignore para venv/, __pycache__/, etc.)
+__pycache__/
 .pytest_cache/
+*.pyc
+
+# Ejecutable del proyecto y artefactos de PyInstaller (generados, no versionados)
+*.exe
+build/
+*.spec
+
+# Accesos directos de Windows (apuntan a rutas locales de cada PC)
+*.lnk
