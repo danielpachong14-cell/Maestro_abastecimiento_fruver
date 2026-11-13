@@ -33,6 +33,7 @@ def _archivos_validos(**overrides):
         }, sheet_name='Items'),
         'portafolio': _excel_bytes({
             'ITEM': [155], 'CLUSTERIZACIÓN': ['A'], 'ESTADO': ['001 - ACTIVO'],
+            'VIDA UTIL EXHIBICION': [5],
         }),
         'tiendas': _excel_bytes({
             'COD SIESA': ['S03'], 'NOMBRE DE LA TIENDA': ['Tienda 3'],
@@ -43,6 +44,10 @@ def _archivos_validos(**overrides):
             'ESTADO': ['001 - ACTIVO'], 'MAX': [0],
         }),
         'espejo': _excel_bytes({'grupo_id': ['G1'], 'item_id': [155]}),
+        'inventario_tiendas': _excel_bytes({
+            'Item': [155], 'C.O. bodega': ['S03'],
+            'Fecha última entrada': ['2026-11-10'],
+        }, sheet_name='Inv Tiendas'),
     }
     archivos.update(overrides)
     return archivos
@@ -50,7 +55,8 @@ def _archivos_validos(**overrides):
 
 def test_carga_exitosa_con_columnas_completas():
     dfs = load_files(**_archivos_validos())
-    assert set(dfs.keys()) == {'stock', 'celes', 'portafolio', 'tiendas', 'tiendas_item', 'espejo'}
+    assert set(dfs.keys()) == {'stock', 'celes', 'portafolio', 'tiendas', 'tiendas_item', 'espejo',
+                               'inventario_tiendas'}
     assert len(dfs['stock']) == 1
 
 
@@ -87,6 +93,22 @@ def test_fallback_a_primera_hoja_si_falta_hoja_preferida():
     assert len(dfs['celes']) == 1
 
 
+def test_busca_la_hoja_con_columnas_requeridas_si_la_primera_no_las_tiene():
+    """Caso real (2026-10): se agregó una tabla dinámica como 1ª hoja de
+    Tiendas × Ítem y los datos quedaron en 'Hoja1'. El loader debe encontrarla."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf) as writer:
+        pd.DataFrame({'Cuenta de ITEM': [28]}).to_excel(writer, index=False, sheet_name='Hoja2')
+        pd.DataFrame({
+            'COD SIESA': ['S03'], 'TIPO DE PORTAFOLIO': ['A'], 'ITEM': [155],
+            'ESTADO': ['001 - ACTIVO'], 'MAX': [0],
+        }).to_excel(writer, index=False, sheet_name='Hoja1')
+    buf.seek(0)
+    dfs = load_files(**_archivos_validos(tiendas_item=buf))
+    assert 'MAX' in dfs['tiendas_item'].columns
+    assert len(dfs['tiendas_item']) == 1
+
+
 def test_espacios_en_encabezados_se_normalizan():
     archivos = _archivos_validos(stock=_excel_bytes({
         'Item ': ['155'], 'Desc. item': ['Prod A'], 'Cant. disponible': [10],
@@ -116,3 +138,54 @@ def test_falta_archivo_obligatorio_lanza_valueerror():
     with pytest.raises(ValueError) as exc:
         load_files(**_archivos_validos(stock=None))
     assert LABELS['stock'] in str(exc.value)
+
+
+def test_inventario_tiendas_es_obligatorio():
+    with pytest.raises(ValueError) as exc:
+        load_files(**_archivos_validos(inventario_tiendas=None))
+    assert LABELS['inventario_tiendas'] in str(exc.value)
+
+
+def test_inventario_tiendas_valida_columnas():
+    mal = _excel_bytes({'Item': [155], 'C.O. bodega': ['S03']})  # falta la fecha
+    with pytest.raises(ValueError) as exc:
+        load_files(**_archivos_validos(inventario_tiendas=mal))
+    assert 'Fecha última entrada' in str(exc.value)
+
+
+def test_vida_util_es_columna_requerida_en_portafolio():
+    sin_vida = _excel_bytes({'ITEM': [155], 'CLUSTERIZACIÓN': ['A'], 'ESTADO': ['001 - ACTIVO']})
+    with pytest.raises(ValueError) as exc:
+        load_files(**_archivos_validos(portafolio=sin_vida))
+    assert 'VIDA UTIL EXHIBICION' in str(exc.value)
+
+
+# ── Portafolio nuevo (nov-2026): VIDA UTIL EXHIBICION + 2 columnas opcionales ──
+
+def test_portafolio_acepta_el_nombre_viejo_vida_util_como_alias():
+    """Un Portafolio anterior (columna `VIDA UTIL`) no debe romper la corrida."""
+    viejo = _excel_bytes({'ITEM': [155], 'CLUSTERIZACIÓN': ['A'], 'ESTADO': ['001 - ACTIVO'], 'VIDA UTIL': [7]})
+    dfs = load_files(**_archivos_validos(portafolio=viejo))
+    assert 'VIDA UTIL EXHIBICION' in dfs['portafolio'].columns
+    assert dfs['portafolio'].loc[0, 'VIDA UTIL EXHIBICION'] == 7
+
+
+def test_portafolio_columnas_nuevas_son_opcionales_y_se_conservan():
+    solo_exhibicion = load_files(**_archivos_validos())
+    assert 'DIAS CONSERVACION CEDI' not in solo_exhibicion['portafolio'].columns   # no bloquea
+
+    completo = _excel_bytes({
+        'ITEM': [155], 'CLUSTERIZACIÓN': ['A'], 'ESTADO': ['001 - ACTIVO'],
+        'VIDA UTIL EXHIBICION': [5], 'DIAS CONSERVACION CEDI': [3], 'TOTAL VIDA UTIL': [8],
+    })
+    dfs = load_files(**_archivos_validos(portafolio=completo))
+    assert {'DIAS CONSERVACION CEDI', 'TOTAL VIDA UTIL'} <= set(dfs['portafolio'].columns)
+
+
+def test_portafolio_en_hoja_con_nombre_distinto_y_formato_tabla():
+    """El nombre de la hoja ya no es 'Hoja1'/'Sheet1' (ahora `DB_Portafolio_Fruver`): se lee la 1.ª hoja."""
+    buf = io.BytesIO()
+    pd.DataFrame({'ITEM': [155], 'CLUSTERIZACIÓN': ['A'], 'ESTADO': ['001 - ACTIVO'],
+                  'VIDA UTIL EXHIBICION': [5]}).to_excel(buf, index=False, sheet_name='DB_Portafolio_Fruver')
+    buf.seek(0)
+    assert len(load_files(**_archivos_validos(portafolio=buf))['portafolio']) == 1

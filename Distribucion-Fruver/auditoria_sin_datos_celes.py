@@ -93,7 +93,8 @@ def vista_hoy():
             stack.enter_context(open(EXCLUIDAS_PATH, "rb"))
             if EXCLUIDAS_PATH.exists() else None
         )
-        dfs = load_files(*archivos, tiendas_excluidas=excl)
+        inv = stack.enter_context(open(INPUT / "Inventario Tiendas.xlsx", "rb"))
+        dfs = load_files(*archivos, tiendas_excluidas=excl, inventario_tiendas=inv)
 
     df_merged, _ = build_distribution_df(dfs)
     sm = df_merged[df_merged["sin_match_celes"]].copy()
@@ -363,10 +364,12 @@ def exportar(hoy_df, total_hoy, hist):
         "  Los Outputs anteriores al 2026-07-02 no traen instrumentación de",
         "  sin-match, por lo que ahí no hay conteo Oficial con qué contrastar.",
         "",
-        "RECOMENDACIÓN",
-        "  Para tener el detalle exacto día a día sin auditar por fuera, se puede",
-        "  añadir una hoja 'Sin Match Celes' al Output diario. Queda fuera de esta",
-        "  entrega por decisión del negocio.",
+        "RECOMENDACIÓN — IMPLEMENTADA (sep-2026)",
+        "  El Output diario ya trae una hoja 'Sin Datos Celes' con el detalle",
+        "  exacto tienda×ítem del día, incluida la causa del faltante. Además",
+        "  esas combinaciones ya NO reciben mercancía (antes se clasificaban",
+        "  como AGOTADA por el consumo=0). Esta auditoría sigue siendo útil",
+        "  solo para la vista HISTÓRICA sobre Outputs anteriores.",
     ]
     for n in notas:
         ws.append([n])

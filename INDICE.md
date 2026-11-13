@@ -29,13 +29,14 @@ Distribucion-Fruver/
 ├── run.py                                        CLI batch: lee Input/, escribe Output/
 ├── Distribuidor_Fruver_Proyecto.exe               Ejecutable generado (PyInstaller) — no versionado
 │
-├── Input/                                        Excel de entrada (6 obligatorios + 1 opcional), no versionados salvo excepción histórica (ver nota)
+├── Input/                                        Excel de entrada (7 obligatorios + 1 opcional), no versionados salvo excepción histórica (ver nota)
 │   ├── Stock.xlsx                                Existencias del CEDI (Siesa)
 │   ├── Celes.xlsx                                Consumos por tienda × ítem
 │   ├── DB_Portafolio Fruver.xlsx                 Catálogo y estado de ítems (validación cruzada)
 │   ├── DB_Tiendas.xlsx                           Maestro de tiendas activas
 │   ├── DB_Tiendas Por itmes y portafolio.xlsx    Elegibilidad tienda × ítem
 │   ├── DB_ProductosEspejo.xlsx                   Grupos de SKUs espejo
+│   ├── Inventario Tiendas.xlsx                   Último ingreso por tienda × ítem (Siesa) — Fase 3 vida útil
 │   └── Tiendas_No generar pedido.xlsx            Tiendas excluidas (opcional)
 │
 ├── Output/                                       Excel generados, uno por corrida: distribucion_fruver_YYYYMMDD.xlsx
@@ -50,9 +51,9 @@ Distribucion-Fruver/
     ├── core/                                     Pipeline de distribución
     │   ├── loader.py                             Carga y valida columnas requeridas de cada Excel
     │   ├── preprocessor.py                       Normaliza claves y hace merge → (df_merged, alertas)
-    │   ├── algorithm.py                          Motor de distribución (3 fases, prioridades, cero residuo)
-    │   └── exporter.py                           Genera el Excel final (5 hojas)
-    └── tests/                                    Suite pytest (67 tests)
+    │   ├── algorithm.py                          Motor de distribución (5 fases, prioridades, cero residuo)
+    │   └── exporter.py                           Genera el Excel final (8 hojas)
+    └── tests/                                    Suite pytest (171 tests)
         ├── test_loader.py
         ├── test_preprocessor.py
         ├── test_algorithm.py

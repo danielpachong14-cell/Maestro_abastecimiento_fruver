@@ -187,7 +187,7 @@ def test_filas_con_item_key_no_convertible_generan_alerta_de_conteo():
 def test_clip_lower_zero_defensivo_ante_inventario_negativo():
     """Un valor negativo de inventario (no debería ocurrir, pero no hay
     garantía externa) no debe propagarse como inventario_efectivo negativo
-    aguas abajo — ver Bug #1 de la auditoría (pesos negativos en Fase 3)."""
+    aguas abajo — ver Bug #1 de la auditoría (pesos negativos en Fase 4)."""
     dfs = _dfs_base(celes=pd.DataFrame({
         'Código de Bodega': ['BOS01'], 'Nombre de Bodega': ['Tienda Uno'],
         'Código de Producto': [155], 'Consumo Diario (Unidades de Distribución)': [1.0],
@@ -293,14 +293,27 @@ def test_bloqueo_por_max_usa_corte_mayor_o_igual(max_valor, existencias, esperad
     assert bool(df_merged['bloqueado_por_max'].iloc[0]) is esperado
 
 
-def test_max_se_compara_contra_existencias_no_contra_inventario_efectivo():
-    """Caso real S96/1210: Existencias 5.07 + tránsito 3 = 8.07 con MAX 6.
-    Debe seguir recibiendo — el tránsito ya va en camino y no bloquea, aunque
-    el inventario efectivo (8.07) supere el MAX."""
+@pytest.mark.parametrize('max_valor,existencias,transito,esperado', [
+    (2, 1.17, 3.0, True),    # caso S53/ciruela 1797: 4.17 >= 2, bloqueada
+    (2, 1.17, 0.0, False),   # sin tránsito: 1.17 < 2, recibe normal
+    (2, 1.0, 1.0, True),     # justo en el MAX por suma: el corte es >=
+    (2, 0.5, 1.0, False),    # 1.5 < 2: la suma todavía no llega al MAX
+    (0, 5.0, 5.0, False),    # MAX 0 = sin tope definido, nunca bloquea
+])
+def test_max_cuenta_existencias_mas_transito(max_valor, existencias, transito, esperado):
+    df_merged, _ = build_distribution_df(_dfs_max(max_valor, existencias, transito=transito))
+    assert bool(df_merged['bloqueado_por_max'].iloc[0]) is esperado
+
+
+def test_max_se_compara_contra_inventario_efectivo_no_solo_existencias():
+    """Antes (caso S96/1210) Existencias 5.07 + tránsito 3 = 8.07 con MAX 6
+    seguía recibiendo porque 5.07 < 6. Desde nov-2026 el tránsito cuenta: el
+    inventario efectivo (8.07) supera el MAX y la fila queda bloqueada."""
     df_merged, _ = build_distribution_df(_dfs_max(6, 5.07, transito=3.0))
     fila = df_merged.iloc[0]
     assert fila['inventario_efectivo'] == pytest.approx(8.07)
-    assert bool(fila['bloqueado_por_max']) is False
+    assert bool(fila['bloqueado_por_max']) is True
+    assert bool(fila['excluida_del_reparto']) is True
 
 
 def test_max_vacio_o_nan_se_trata_como_sin_tope():
@@ -317,25 +330,320 @@ def test_bloqueo_por_max_genera_alerta_agregada():
     assert adv[0]['tipo'] == 'ADVERTENCIA'
 
 
+def _celes_vacio():
+    """Celes sin ninguna fila: fuerza el escenario de sin match para todas las
+    combinaciones elegibles."""
+    return pd.DataFrame({
+        'Código de Bodega': pd.Series(dtype='object'),
+        'Nombre de Bodega': pd.Series(dtype='object'),
+        'Código de Producto': pd.Series(dtype='object'),
+        'Consumo Diario (Unidades de Distribución)': pd.Series(dtype='float'),
+        '(=) Días de Inventario Actuales': pd.Series(dtype='float'),
+        'Inventario Disponible en esta Tienda (Unidades de Distibución)': pd.Series(dtype='float'),
+        '(-) inventario de traslado en proceso': pd.Series(dtype='float'),
+        '(=) Inventario Total': pd.Series(dtype='float'),
+        'UM': pd.Series(dtype='object'),
+    })
+
+
 def test_sin_match_en_celes_no_se_bloquea_por_max():
     """Sin datos de Celes las existencias quedan en 0 — no se debe asumir
-    saturación y bloquear el envío."""
+    saturación y bloquear por MAX (queda excluida por la otra causa, ver
+    `test_sin_match_en_celes_queda_excluida_del_reparto`)."""
     dfs = _dfs_base(
         tiendas_item=pd.DataFrame({
             'COD SIESA': ['S01'], 'TIPO DE PORTAFOLIO': ['A'], 'ITEM': [155],
             'ESTADO': ['001 - ACTIVO'], 'MAX': [6],
         }),
-        celes=pd.DataFrame({
-            'Código de Bodega': pd.Series(dtype='object'),
-            'Nombre de Bodega': pd.Series(dtype='object'),
-            'Código de Producto': pd.Series(dtype='object'),
-            'Consumo Diario (Unidades de Distribución)': pd.Series(dtype='float'),
-            '(=) Días de Inventario Actuales': pd.Series(dtype='float'),
-            'Inventario Disponible en esta Tienda (Unidades de Distibución)': pd.Series(dtype='float'),
-            '(-) inventario de traslado en proceso': pd.Series(dtype='float'),
-            '(=) Inventario Total': pd.Series(dtype='float'),
-            'UM': pd.Series(dtype='object'),
-        }),
+        celes=_celes_vacio(),
     )
     df_merged, _ = build_distribution_df(dfs)
     assert bool(df_merged['bloqueado_por_max'].iloc[0]) is False
+
+
+# ---------------------------------------------------------------------------
+# Exclusión del reparto: unión de tope MAX + sin datos en Celes
+# ---------------------------------------------------------------------------
+
+def test_sin_match_en_celes_queda_excluida_del_reparto():
+    """Aunque no la bloquee el MAX, una combinación sin datos en Celes debe
+    quedar fuera del reparto: llega con consumo=0/inventario=0 y sin esto se
+    clasificaría como AGOTADA, recibiendo cajas porque falta el dato."""
+    df_merged, _ = build_distribution_df(_dfs_base(celes=_celes_vacio()))
+    fila = df_merged.iloc[0]
+    assert bool(fila['sin_match_celes']) is True
+    assert bool(fila['bloqueado_por_max']) is False
+    assert bool(fila['excluida_del_reparto']) is True
+
+
+def test_excluida_del_reparto_cubre_el_bloqueo_por_max():
+    df_merged, _ = build_distribution_df(_dfs_max(6, 9.0))
+    fila = df_merged.iloc[0]
+    assert bool(fila['sin_match_celes']) is False
+    assert bool(fila['bloqueado_por_max']) is True
+    assert bool(fila['excluida_del_reparto']) is True
+
+
+def test_combinacion_normal_no_queda_excluida():
+    df_merged, _ = build_distribution_df(_dfs_base())
+    assert bool(df_merged['excluida_del_reparto'].iloc[0]) is False
+
+
+# ---------------------------------------------------------------------------
+# Causa del sin-match (para la hoja "Sin Datos Celes")
+# ---------------------------------------------------------------------------
+
+def _celes_una_fila(cod_bodega, cod_producto):
+    return pd.DataFrame({
+        'Código de Bodega': [cod_bodega], 'Nombre de Bodega': ['Otra Tienda'],
+        'Código de Producto': [cod_producto],
+        'Consumo Diario (Unidades de Distribución)': [1.0],
+        '(=) Días de Inventario Actuales': [1.0],
+        'Inventario Disponible en esta Tienda (Unidades de Distibución)': [1.0],
+        '(-) inventario de traslado en proceso': [0.0],
+        '(=) Inventario Total': [1.0], 'UM': ['CJ20'],
+    })
+
+
+def test_causa_sin_match_tienda_ausente_de_celes():
+    """El ítem 155 sí está en Celes, pero para otra tienda (S99): lo que falta
+    es la tienda S01."""
+    df_merged, _ = build_distribution_df(_dfs_base(celes=_celes_una_fila('BOS99', 155)))
+    assert df_merged['causa_sin_match'].iloc[0] == 'Tienda ausente de Celes'
+
+
+def test_causa_sin_match_item_ausente_de_celes():
+    """La tienda S01 sí está en Celes, pero con otro ítem (999)."""
+    df_merged, _ = build_distribution_df(_dfs_base(celes=_celes_una_fila('BOS01', 999)))
+    assert df_merged['causa_sin_match'].iloc[0] == 'Ítem ausente de todo Celes'
+
+
+def test_causa_sin_match_par_faltante():
+    """Tienda e ítem existen en Celes por separado, pero no la combinación:
+    dos filas cruzadas (S01/999 y S99/155) dejan S01/155 sin match."""
+    celes = pd.concat([
+        _celes_una_fila('BOS01', 999),
+        _celes_una_fila('BOS99', 155),
+    ], ignore_index=True)
+    df_merged, _ = build_distribution_df(_dfs_base(celes=celes))
+    assert df_merged['causa_sin_match'].iloc[0] == 'Par tienda-ítem faltante'
+
+
+def test_causa_sin_match_vacia_cuando_si_hay_match():
+    df_merged, _ = build_distribution_df(_dfs_base())
+    assert df_merged['causa_sin_match'].iloc[0] == ''
+
+
+# ── Auditoría 360 (2026-11-12): duplicados y cantidades fraccionarias ──────────
+
+def test_stock_repetido_suma_cajas_y_alerta():
+    """Un ítem repetido en Stock suma sus cajas (antes se perdía la 2ª fila)."""
+    dfs = _dfs_base(stock=pd.DataFrame({
+        'Item': [155, '0000155'], 'Desc. item': ['Producto A', 'Producto A (dup)'],
+        'Cant. disponible': [17.0, 5.0], 'U.M.': ['CJ20', 'CJ20'],
+        'ESTADO DEL PRODUCTO': ['001 - ACTIVO', '001 - ACTIVO'],
+    }))
+    df_merged, alertas = build_distribution_df(dfs)
+    assert len(df_merged) == 1
+    assert int(df_merged.loc[0, 'cajas_disponibles_cedi']) == 22
+    rep = [a for a in alertas if a.get('filas_repetidas') and a['item'] == 155]
+    assert len(rep) == 1 and rep[0]['cajas_en_cedi'] == 22
+
+
+def test_stock_fraccionario_alerta_cajas_descartadas():
+    dfs = _dfs_base(stock=pd.DataFrame({
+        'Item': [155], 'Desc. item': ['Producto A'], 'Cant. disponible': [4.9],
+        'U.M.': ['CJ20'], 'ESTADO DEL PRODUCTO': ['001 - ACTIVO'],
+    }))
+    df_merged, alertas = build_distribution_df(dfs)
+    assert int(df_merged.loc[0, 'cajas_disponibles_cedi']) == 4
+    fr = [a for a in alertas if a.get('filas_fraccionarias')]
+    assert len(fr) == 1 and fr[0]['cajas_descartadas'] == pytest.approx(0.9)
+
+
+def test_tiendas_item_repetido_usa_max_mas_restrictivo():
+    """Par repetido con MAX distintos: prevalece el menor MAX > 0, sin importar
+    el orden de las filas, y se alerta."""
+    for maxes in ([8, 5], [5, 8], [0, 5], [5, 0]):
+        dfs = _dfs_base(tiendas_item=pd.DataFrame({
+            'COD SIESA': ['S01', 'S01'], 'TIPO DE PORTAFOLIO': ['A', 'A'], 'ITEM': [155, 155],
+            'ESTADO': ['001 - ACTIVO', '001 - ACTIVO'], 'MAX': maxes,
+        }))
+        df_merged, alertas = build_distribution_df(dfs)
+        assert len(df_merged) == 1
+        assert df_merged.loc[0, 'max_existencias'] == 5, maxes
+        assert any(a.get('pares_repetidos') == 1 for a in alertas)
+
+
+def test_tiendas_item_repetido_sin_max_queda_sin_tope():
+    dfs = _dfs_base(tiendas_item=pd.DataFrame({
+        'COD SIESA': ['S01', 'S01'], 'TIPO DE PORTAFOLIO': ['A', 'A'], 'ITEM': [155, 155],
+        'ESTADO': ['001 - ACTIVO', '001 - ACTIVO'], 'MAX': [0, 0],
+    }))
+    df_merged, _ = build_distribution_df(dfs)
+    assert df_merged.loc[0, 'max_existencias'] == 0
+    assert not df_merged.loc[0, 'bloqueado_por_max']
+
+
+def test_tienda_repetida_en_maestro_no_duplica_filas():
+    dfs = _dfs_base(tiendas=pd.DataFrame({
+        'COD SIESA': ['S01', 'S01'], 'NOMBRE DE LA TIENDA': ['Tienda Uno', 'Tienda Uno'],
+        'TIPO DE PORTAFOLIO': ['A', 'A'], 'ZONA': ['NORTE', 'NORTE'],
+    }))
+    df_merged, alertas = build_distribution_df(dfs)
+    assert len(df_merged) == 1
+    assert any('DB_Tiendas' in a['mensaje'] for a in alertas)
+
+
+# ── Fase 3: insumos de renovación por vida útil (Inventario Tiendas + VIDA UTIL EXHIBICION) ─
+
+def _dfs_renovacion(fechas, vida_util=5, **overrides):
+    """_dfs_base + Inventario Tiendas + VIDA UTIL EXHIBICION. `fechas` es una lista de
+    (C.O. bodega, ítem, fecha) del extracto; la fecha MÁS RECIENTE del archivo
+    es la fecha de corte contra la que se cuentan los días."""
+    base = _dfs_base()
+    base['portafolio'] = pd.DataFrame({
+        'ITEM': [155], 'CLUSTERIZACIÓN': ['A'], 'ESTADO': ['001 - ACTIVO'], 'VIDA UTIL EXHIBICION': [vida_util],
+    })
+    base['inventario_tiendas'] = pd.DataFrame({
+        'Item': [f[1] for f in fechas],
+        'C.O. bodega': [f[0] for f in fechas],
+        'Fecha última entrada': [pd.Timestamp(f[2]) if f[2] else pd.NaT for f in fechas],
+    })
+    base.update(overrides)
+    return base
+
+
+def test_renovacion_calcula_dias_contra_la_fecha_de_corte_del_archivo():
+    dfs = _dfs_renovacion([('S01', 155, '2026-11-04'), ('S99', 999, '2026-11-12')])
+    df_merged, _ = build_distribution_df(dfs)
+    fila = df_merged.iloc[0]
+    assert fila['dias_desde_ingreso'] == 8
+    assert fila['vida_util_portafolio'] == 5
+    assert fila['fecha_ultimo_ingreso'] == pd.Timestamp('2026-11-04')
+    assert fila['venta_esperada_vida_util'] == pytest.approx(1.0 * 5)   # consumo 1.0 × vida útil
+
+
+def test_renovacion_vida_util_vacia_o_cero_se_omite():
+    for vu in (None, 0):
+        df_merged, _ = build_distribution_df(
+            _dfs_renovacion([('S01', 155, '2026-11-04'), ('S99', 999, '2026-11-12')], vida_util=vu))
+        assert pd.isna(df_merged.iloc[0]['vida_util_portafolio']), vu
+        assert pd.isna(df_merged.iloc[0]['venta_esperada_vida_util']), vu
+
+
+def test_renovacion_varias_sub_bodegas_toman_el_ingreso_mas_reciente():
+    dfs = _dfs_renovacion([('S01', 155, '2026-10-01'), ('S01', 155, '2026-11-10'),
+                           ('S99', 999, '2026-11-12')])
+    df_merged, _ = build_distribution_df(dfs)
+    assert df_merged.iloc[0]['dias_desde_ingreso'] == 2
+
+
+def test_renovacion_sin_fecha_de_ingreso_deja_dias_vacios_y_alerta():
+    dfs = _dfs_renovacion([('S01', 155, None), ('S99', 999, '2026-11-12')])
+    df_merged, alertas = build_distribution_df(dfs)
+    assert pd.isna(df_merged.iloc[0]['dias_desde_ingreso'])
+    assert any(a.get('combos_sin_fecha_ingreso') == 1 for a in alertas)
+
+
+def test_renovacion_alerta_si_el_inventario_tiendas_esta_desactualizado():
+    dfs = _dfs_renovacion([('S01', 155, '2020-01-01')])
+    _, alertas = build_distribution_df(dfs)
+    assert any('desactualizado' in a['mensaje'] for a in alertas)
+
+
+def test_renovacion_sin_inventario_tiendas_no_rompe_y_deja_columnas_vacias():
+    df_merged, _ = build_distribution_df(_dfs_base())
+    assert pd.isna(df_merged.iloc[0]['dias_desde_ingreso'])
+    assert not df_merged.iloc[0]['grupo_con_ingreso_fresco']
+
+
+def test_renovacion_marca_ingreso_fresco_si_un_sku_espejo_entro_recientemente():
+    dfs = _dfs_base()
+    dfs['stock'] = pd.DataFrame({
+        'Item': [155, 156], 'Desc. item': ['A', 'B'], 'Cant. disponible': [10.0, 10.0],
+        'U.M.': ['CJ20', 'CJ20'], 'ESTADO DEL PRODUCTO': ['001 - ACTIVO'] * 2,
+    })
+    dfs['celes'] = pd.concat([dfs['celes'], dfs['celes'].assign(**{'Código de Producto': 156})],
+                             ignore_index=True)
+    dfs['portafolio'] = pd.DataFrame({
+        'ITEM': [155, 156], 'CLUSTERIZACIÓN': ['A', 'A'], 'ESTADO': ['001 - ACTIVO'] * 2,
+        'VIDA UTIL EXHIBICION': [5, 5],
+    })
+    dfs['tiendas_item'] = pd.DataFrame({
+        'COD SIESA': ['S01', 'S01'], 'TIPO DE PORTAFOLIO': ['A', 'A'], 'ITEM': [155, 156],
+        'ESTADO': ['001 - ACTIVO'] * 2, 'MAX': [0, 0],
+    })
+    dfs['espejo'] = pd.DataFrame({'grupo_id': ['G', 'G'], 'item_id': [155, 156]})
+    dfs['inventario_tiendas'] = pd.DataFrame({
+        'Item': [155, 156], 'C.O. bodega': ['S01', 'S01'],
+        'Fecha última entrada': [pd.Timestamp('2026-11-01'), pd.Timestamp('2026-11-11')],
+    })
+    df_merged, _ = build_distribution_df(dfs)
+    assert df_merged['grupo_con_ingreso_fresco'].all()   # 156 entró hace 1 día (≤ 5)
+
+
+# ── Portafolio nuevo: VIDA UTIL EXHIBICION / DIAS CONSERVACION CEDI / TOTAL VIDA UTIL ──
+
+def _dfs_portafolio(**cols):
+    return _dfs_renovacion([('S01', 155, '2026-11-04'), ('S99', 999, '2026-11-12')],
+                           portafolio=pd.DataFrame({
+                               'ITEM': [155], 'CLUSTERIZACIÓN': ['A'], 'ESTADO': ['001 - ACTIVO'], **cols}))
+
+
+def test_vida_util_total_y_cedi_quedan_en_df_merged():
+    dfs = _dfs_portafolio(**{'VIDA UTIL EXHIBICION': [5], 'DIAS CONSERVACION CEDI': [3], 'TOTAL VIDA UTIL': [8]})
+    f = build_distribution_df(dfs)[0].iloc[0]
+    assert (f['vida_util_portafolio'], f['vida_util_cedi'], f['vida_util_total']) == (5, 3, 8)
+
+
+def test_la_fase_3_usa_solo_vida_util_exhibicion():
+    """DIAS CONSERVACION CEDI y TOTAL no alteran los días que se comparan con el ingreso."""
+    dfs = _dfs_portafolio(**{'VIDA UTIL EXHIBICION': [5], 'DIAS CONSERVACION CEDI': [30], 'TOTAL VIDA UTIL': [35]})
+    f = build_distribution_df(dfs)[0].iloc[0]
+    assert f['vida_util_portafolio'] == 5 and f['venta_esperada_vida_util'] == pytest.approx(1.0 * 5)
+
+
+def test_vida_util_total_se_reconstruye_si_la_formula_llega_vacia():
+    dfs = _dfs_portafolio(**{'VIDA UTIL EXHIBICION': [5], 'DIAS CONSERVACION CEDI': [3], 'TOTAL VIDA UTIL': [float('nan')]})
+    df_merged, alertas = build_distribution_df(dfs)
+    assert df_merged.iloc[0]['vida_util_total'] == 8
+    assert not any('TOTAL VIDA UTIL' in a['mensaje'] for a in alertas)
+
+
+def test_alerta_si_total_no_cuadra_con_exhibicion_mas_cedi():
+    dfs = _dfs_portafolio(**{'VIDA UTIL EXHIBICION': [5], 'DIAS CONSERVACION CEDI': [3], 'TOTAL VIDA UTIL': [20]})
+    _, alertas = build_distribution_df(dfs)
+    assert any('TOTAL VIDA UTIL distinto' in a['mensaje'] and a['items_afectados'] == [155] for a in alertas)
+
+
+def test_alerta_por_vida_util_negativa_o_no_numerica():
+    dfs = _dfs_portafolio(**{'VIDA UTIL EXHIBICION': ['abc'], 'DIAS CONSERVACION CEDI': [-2]})
+    df_merged, alertas = build_distribution_df(dfs)
+    assert pd.isna(df_merged.iloc[0]['vida_util_portafolio'])          # no numérica = vacía
+    assert any('negativos' in a['mensaje'] for a in alertas)
+    assert any(a.get('celdas_no_numericas') == 1 for a in alertas)
+
+
+def test_sin_columnas_opcionales_el_preprocesador_no_se_rompe():
+    df_merged, _ = build_distribution_df(_dfs_portafolio(**{'VIDA UTIL EXHIBICION': [5]}))
+    f = df_merged.iloc[0]
+    assert f['vida_util_portafolio'] == 5 and pd.isna(f['vida_util_cedi']) and pd.isna(f['vida_util_total'])
+
+
+def test_limite_de_la_regla_de_extremo_a_extremo_vida_util_5():
+    """Con vida útil 5 y fecha de corte 2026-11-12: ingreso el 11-08 (4 días) y el 11-07 (5 días) no
+    renuevan; el 11-06 (6 días) sí. Recorre preprocessor + algoritmo completos."""
+    from core.algorithm import run_distribution
+    resultados = {}
+    for ingreso in ('2026-11-08', '2026-11-07', '2026-11-06'):
+        dfs = _dfs_renovacion([('S01', 155, ingreso), ('S99', 999, '2026-11-12')])
+        dfs['celes'] = dfs['celes'].assign(**{
+            'Consumo Diario (Unidades de Distribución)': 0.3,
+            'Inventario Disponible en esta Tienda (Unidades de Distibución)': 1.5,
+            '(=) Días de Inventario Actuales': 5.0, '(=) Inventario Total': 1.5,
+        })
+        df_merged, _ = build_distribution_df(dfs)
+        out, _ = run_distribution(df_merged)
+        resultados[ingreso] = (int(df_merged.iloc[0]['dias_desde_ingreso']), int(out['cajas_fase3'].sum()))
+    assert resultados == {'2026-11-08': (4, 0), '2026-11-07': (5, 0), '2026-11-06': (6, 1)}, resultados

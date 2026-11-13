@@ -8,7 +8,7 @@ Funciona como una aplicación web liviana: el operador sube seis archivos Excel 
 
 ---
 
-## Archivos de entrada (6 Excel obligatorios + 1 opcional)
+## Archivos de entrada (7 Excel obligatorios + 1 opcional)
 
 | Archivo | Clave interna | Obligatorio | Contenido |
 |---|---|---|---|
@@ -45,11 +45,21 @@ Funciona como una aplicación web liviana: el operador sube seis archivos Excel 
 | `(-) inventario de traslado en proceso` | Cajas en tránsito hacia la tienda |
 | `UM` | Unidad de medida desde Celes |
 
+**Inventario Tiendas (Siesa)**
+
+| Campo | Uso |
+|---|---|
+| `C.O. bodega` | Código de la tienda (igual al `COD SIESA`) |
+| `Item` | Código del ítem |
+| `Fecha última entrada` | Fecha del último ingreso del ítem a la tienda — alimenta la Fase 3 (renovación por vida útil). Con varias sub-bodegas se toma la más reciente |
+
 **Portafolio Fruver**
 
 | Campo | Uso |
 |---|---|
 | `ITEM` | Código de ítem — catálogo completo para validación cruzada |
+| `VIDA UTIL EXHIBICION` | Días que dura el producto en tienda; define la Fase 3 y el riesgo de merma (vacía o 0 = el ítem se omite) |
+| `DIAS CONSERVACION CEDI` · `TOTAL VIDA UTIL` | Opcionales, sin efecto hoy: quedan para un análisis futuro de compras (días de vida en CEDI vs. vida útil total = exhibición + CEDI) |
 | `ESTADO` | `ACTIVO` / no-activo — cruza contra Stock para alertar ítems nuevos sin catalogar o descontinuados con existencia |
 
 > No participa en el cálculo de cajas ni en la elegibilidad tienda-ítem (esa viene de Tiendas × Ítem). `CLUSTERIZACIÓN` no se usa todavía en el cálculo.
@@ -98,7 +108,7 @@ Funciona como una aplicación web liviana: el operador sube seis archivos Excel 
 1. **Carga y validación** — verifica que cada archivo tenga las columnas requeridas y alerta si falta algo antes de procesar.
 2. **Normalización** — resuelve automáticamente las diferencias de codificación entre los archivos (ej. el stock usa `'0000155'` como texto, mientras los otros usan `155` como número; Celes usa `BOS03` mientras la base de tiendas usa `S03`; los estados tipo `'001 - ACTIVO'` se comparan por el último segmento tras el guion, exacto — no por contención de texto, porque `'INACTIVO'` también contiene la subcadena `'ACTIVO'`).
 3. **Distribución** — el motor asigna las cajas disponibles priorizando las tiendas con mayor urgencia y garantizando que el inventario del CEDI quede en cero.
-4. **Exportación** — genera el Excel de salida con cinco hojas: Distribución, Resumen, Resumen Ítems, Análisis Comprador y Alertas.
+4. **Exportación** — genera el Excel de salida con ocho hojas: Distribución, Resumen, Resumen Ítems, Análisis Comprador, Sin Datos Celes, Bloqueadas por MAX, Renovación Vida Útil y Alertas.
 
 ### Cálculos del preprocesamiento
 
@@ -115,15 +125,15 @@ Cada tienda recibe cajas según su nivel de urgencia (calculado sobre el inventa
 | Prioridad | Condición | Acción |
 |---|---|---|
 | **AGOTADA** | Inventario efectivo de grupo < 0.4 cajas | Recibe primero, mínimo 1 caja |
-| **STOCK DE SEGURIDAD** | Inventario efectivo de grupo < 0.7 cajas | Segunda en recibir, mínimo 1 caja |
+| **STOCK DE SEGURIDAD** | Inventario efectivo de grupo < 0.9 cajas | Segunda en recibir, mínimo 1 caja |
 | **REPOSICIÓN** | Menos de 3 días de inventario proyectado de grupo | Recibe cajas para llegar al objetivo |
 | **CUBIERTA** | 3 o más días de inventario proyectado de grupo | Solo recibe si queda sobrante |
 
 El inventario proyectado considera tanto las existencias físicas en tienda como el inventario ya en tránsito, evitando sobre-abastecimiento.
 
-### Las tres fases de reparto
+### Las cinco fases de reparto
 
-Dentro de cada ítem, las tiendas elegibles se ordenan por prioridad descendente y consumo descendente, y se reparten en tres fases secuenciales con alcance de negocio distinto:
+Dentro de cada ítem, las tiendas elegibles se ordenan por prioridad descendente y consumo descendente, y se reparten en cinco fases secuenciales con alcance de negocio distinto:
 
 **Fase 1 — Rondas crecientes (cap 1 → `MIN_CAJAS_INICIAL`)**
 Todas las tiendas elegibles reciben su 1.ª caja antes de que cualquiera reciba su 2.ª. Evita que tiendas de alto consumo acaparen el stock cuando hay múltiples tiendas agotadas.
@@ -131,8 +141,11 @@ Todas las tiendas elegibles reciben su 1.ª caja antes de que cualquiera reciba 
 **Fase 2 — Proporcional a `TARGET_DAYS`**
 Si el stock no alcanza para llevar a todas las tiendas a 3 días, la escasez se reparte proporcionalmente a la necesidad de cada una (`floor` + corrección Hamilton para el residuo entero). Para ítems que comparten grupo de producto espejo, la necesidad se calcula UNA VEZ por grupo y se reparte entre sus SKUs — no se redondea hacia arriba (`ceil`) por ítem por separado, porque eso sobreprovisiona el CEDI.
 
-**Fase 3 — Sobrante ponderado por días**
-Si quedan cajas tras cubrir 3 días en todas las tiendas, se reparten por rondas proporcional a `consumo_diario / días_actuales` (no "1 en 1" ni por consumo a secas) entre las tiendas elegibles, siempre que estén bajo `TOPE_EXCEDENTE = 5` días proyectados tras recibir. Esto reparte DÍAS de forma pareja, no cajas — repartir la misma cantidad de cajas entre tiendas de consumo muy distinto da días muy distintos por caja. Si todas las tiendas elegibles llegan al tope, un "Paso B" de cero-residuo reparte lo que quede por menor `días_actuales`, ignorando el tope de cajas por entrega — la garantía de cero residuo tiene prioridad.
+**Fase 3 — Renovación por vida útil**
+Si el último ingreso de un ítem a una tienda fue hace *más* días que su vida útil y la tienda todavía figura con inventario, lo más probable es que ese producto ya esté vencido sin haberse dado de baja; el sistema lo cuenta como inventario y la tienda nunca se repone. Esta fase le envía **1 caja**, siempre que no tenga mercancía en tránsito, no haya recibido ya en las Fases 1-2, y ningún SKU espejo tenga ingreso fresco. No se exige una venta mínima: si el ingreso ya superó la vida útil, se renueva siempre (decisión del negocio; existe un umbral opcional de venta esperada, hoy en 0). Usa solo el sobrante, de modo que no cambia cuánto sale del CEDI sino a qué tiendas va. Las tiendas donde no conviene enviar quedan listadas, con su motivo, en la hoja «Renovación Vida Útil» (útil como lista de bajas de inventario pendientes). Si el stock no alcanza, se prioriza a las de mayor venta esperada.
+
+**Fase 4 — Sobrante ponderado por días**
+Si quedan cajas tras cubrir 3 días en todas las tiendas, se reparten por rondas proporcional a `consumo_diario / días_actuales` (no "1 en 1" ni por consumo a secas) entre las tiendas elegibles, siempre que estén bajo `TOPE_EXCEDENTE = 5` días proyectados tras recibir. Esto reparte DÍAS de forma pareja, no cajas — repartir la misma cantidad de cajas entre tiendas de consumo muy distinto da días muy distintos por caja. **Fase 5 — Cero residuo.** Si todas las tiendas elegibles llegan al tope, esta fase final reparte lo que quede por menor `días_actuales`, ignorando el tope de cajas por entrega — la garantía de cero residuo tiene prioridad.
 
 ### Restricciones absolutas
 
@@ -148,7 +161,7 @@ Si quedan cajas tras cubrir 3 días en todas las tiendas, se reparten por rondas
 
 El algoritmo tiene una regla no negociable: **la suma de cajas asignadas a todas las tiendas debe ser igual al 100% de las cajas disponibles en el CEDI**, para cada ítem que llegue a tener al menos una tienda elegible. La validación ocurre en tres capas:
 
-1. **Durante la distribución**: si tras las 3 fases queda residuo, se genera una alerta `CRÍTICO` (solo ocurre si un ítem no tiene ninguna tienda elegible en Celes).
+1. **Durante la distribución**: si tras las 5 fases queda residuo, se genera una alerta `CRÍTICO` (solo ocurre si un ítem no tiene ninguna tienda elegible en Celes).
 2. **En el output**: la hoja **Alertas** (una fila por problema, ordenadas por severidad, o `"OK — Sin alertas"`) y la métrica "Cajas sin distribuir" en la UI.
 3. **Calidad de datos aguas arriba** (`preprocessor.py`): combinaciones tienda-ítem sin match en Celes, ítems huérfanos con stock pero sin tienda elegible, filas descartadas por código no normalizable, e ítems nuevos o descontinuados detectados por validación cruzada contra Portafolio Fruver.
 
@@ -161,8 +174,8 @@ Ubicados en `distribuidor-fruver/core/algorithm.py` (fuente de verdad si este do
 | Parámetro | Valor actual | Descripción |
 |---|---|---|
 | `TARGET_DAYS` | `3.0` | Días de inventario objetivo por tienda |
-| `MIN_STOCK_AGOTADO` | `0.2` | Umbral de stock (cajas) para clasificar como AGOTADA |
-| `MIN_STOCK_SAFETY` | `0.5` | Umbral de stock (cajas) para clasificar como SAFETY |
+| `MIN_STOCK_AGOTADO` | `0.4` | Umbral de stock (cajas) para clasificar como AGOTADA |
+| `MIN_STOCK_SAFETY` | `0.9` | Umbral de stock (cajas) para clasificar como SAFETY |
 | `MIN_CAJAS_INICIAL` | `2` | Cap máximo de la Fase 1 (rondas hasta cap 2) |
 | `MAX_CAJAS_POR_ITEM` | `3` | Tope duro de cajas por tienda-ítem |
 | `TOPE_EXCEDENTE` | `5` | Días máximos que puede acumular una tienda del sobrante (algoritmo real, `core/algorithm.py`) |
@@ -173,44 +186,35 @@ Ubicados en `distribuidor-fruver/core/algorithm.py` (fuente de verdad si este do
 
 ## Archivo de salida
 
-`distribucion_fruver_YYYYMMDD.xlsx`, con **cinco hojas**: Distribución, Resumen, Resumen Ítems, Análisis Comprador y Alertas.
+`distribucion_fruver_YYYYMMDD.xlsx`, con **ocho hojas** (encabezado fijo y filtros en todas). Las dos primeras son el pedido; las demás ayudan a entenderlo y a decidir.
 
-### Hoja "Distribución"
+### Hoja "Distribución" — el pedido ejecutable
 
-El pedido ejecutable, ordenado por tienda y luego por ítem.
+Ordenado por tienda y luego por ítem. La columna clave es **Pedido Final**: cajas completas a enviar (siempre entero).
 
 | Columna | Contenido |
 |---|---|
-| Centro Operacional de la Bodega | COD SIESA de la tienda destino (ej. `S03`) |
-| Nombre Tienda | Nombre de la tienda |
-| Zona | Zona geográfica de la tienda |
-| Código de Producto | Código del ítem (entero) |
-| Nombre Ítem | Descripción del ítem |
-| UM | Unidad de medida (referencia, ej. `CJ20`) |
+| Centro Operacional de la Bodega / Nombre Tienda / Zona | Tienda destino (COD SIESA, ej. `S03`) |
+| Código de Producto / Nombre Ítem / UM | Ítem y unidad de medida (referencia) |
 | Consumo Diario | Cajas/día de esa tienda |
-| Stock Antes Pedido | Inventario efectivo antes del pedido |
-| Días Inventario Actual | Días de stock antes del pedido |
-| **Pedido Final** | **Cajas completas a enviar (siempre entero)** |
-| Stock Después Pedido | Inventario efectivo tras recibir el pedido |
-| Días Inventario Proyectado | Días de stock proyectados después del pedido |
+| Stock Antes Pedido · Días Inventario Actual | Inventario efectivo y días de stock antes del pedido |
+| **Pedido Final** | **Cajas a enviar** |
+| Stock Después Pedido · Días Inventario Proyectado | Inventario y días tras recibir el pedido |
 
-### Hoja "Resumen"
+### Hoja "Resumen" — total de cajas por tienda (de mayor a menor)
 
-Total de cajas por tienda, ordenado de mayor a menor. Incluye COD SIESA, Nombre Tienda, Zona y Total Cajas.
+### Hojas de apoyo
 
-### Hoja "Resumen Ítems"
+| Hoja | Para qué sirve | Qué muestra |
+|---|---|---|
+| Resumen Ítems | Ver cuántas cajas lleva cada ítem y de qué fase | F1 Urgentes · F2 Cobertura 3d · F3 Renovación · F4 Excedente · F5 Forzado, y **% Forzado** (un % alto indica sobre-compra del ítem) |
+| Análisis Comprador | Decidir la próxima compra | Cajas CEDI frente a las necesarias para 3 días, exceso, % de tiendas en riesgo de merma y de sobrestock (>10 días), nivel de riesgo (ALTO → OK) y recomendación |
+| Sin Datos Celes | Saber a qué tiendas no se envió por falta de datos | Tienda, ítem, causa (tienda / ítem / par ausente de Celes) |
+| Bloqueadas por MAX | Saber a qué tiendas no se envió por su tope | Existencias + Tránsito frente a su MAX |
+| Renovación Vida Útil | Ver dónde hay producto probablemente vencido y qué se hizo | Último ingreso, días, vida útil, existencias, venta esperada, cajas enviadas y motivo (renovada, tránsito, SKU espejo fresco, ya recibió, sin stock…). Las de baja venta esperada son candidatas a baja de inventario o revisión de surtido |
+| Alertas | Saber qué revisar | Tipo, ítem y mensaje, ordenados por severidad; `OK — Sin alertas` si todo va bien |
 
-Total de cajas por ítem, desglosado por Fase 1 / Fase 2 / Fase 3, con notas explicativas de cada fase en las primeras filas.
-
-### Hoja "Análisis Comprador"
-
-Por ítem, compara las cajas disponibles en CEDI contra el mínimo necesario para cubrir `TARGET_DAYS` en todas las tiendas, y clasifica el nivel de riesgo de sobre-compra para orientar la próxima decisión de compra. Incluye el riesgo de merma por ítem (`# Tiendas con Riesgo Merma` / `% Tiendas con Riesgo`, contra el umbral `min(10, vida_útil)`) — el detalle tienda-ítem vivía antes en una hoja aparte ("Riesgo Merma"), que se quitó a pedido del usuario.
-
-También incluye `# Tiendas con Riesgo Sobrestock` / `% Tiendas con Riesgo Sobrestock`, contra `UMBRAL_RIESGO_SOBRESTOCK` (10 días) — un umbral de evaluación de riesgo independiente de `TOPE_EXCEDENTE` (el tope real que usa el algoritmo en Fase 3). Se desacoplaron a propósito (auditoría 2026-07) para poder subir el umbral de evaluación de riesgo sin cambiar el comportamiento real de distribución.
-
-### Hoja "Alertas"
-
-Todos los casos borde detectados durante el procesamiento (algoritmo y preprocesamiento), ordenados por severidad. Si todo va bien, muestra `"OK — Sin alertas"`.
+En Sin Datos Celes y Bloqueadas por MAX, **Cajas Forzadas** > 0 indica que, por la garantía de cero residuo, igual se les envió porque no había otro destino. El umbral de sobrestock del reporte (10 días) es independiente del tope del algoritmo (5 días): cambiarlo no altera las cajas despachadas.
 
 ---
 
@@ -248,7 +252,7 @@ Manualmente es fácil que queden cajas sin asignar por errores de redondeo o por
 Cuando hay un problema (ítem sin tiendas elegibles, archivo con columnas faltantes, cajas sin distribuir), la herramienta lo señala inmediatamente con un mensaje de error en la interfaz y lo registra en la hoja Alertas del Excel de salida. En el proceso manual estos problemas pasan desapercibidos o se detectan días después.
 
 **7. Trazabilidad y auditoría**
-El archivo de salida incluye cinco hojas: la distribución detallada, un resumen de cajas por tienda, un desglose por ítem y fase de reparto, un análisis para el comprador (incluye riesgo de merma por ítem) y una hoja de alertas. Cualquier persona puede revisar por qué una tienda recibió determinada cantidad. En el proceso manual esto requiere recordar o documentar manualmente las decisiones tomadas.
+El archivo de salida incluye siete hojas: la distribución detallada, un resumen de cajas por tienda, un desglose por ítem y fase de reparto, un análisis para el comprador (incluye riesgo de merma por ítem) y una hoja de alertas. Cualquier persona puede revisar por qué una tienda recibió determinada cantidad. En el proceso manual esto requiere recordar o documentar manualmente las decisiones tomadas.
 
 **8. Reducción del riesgo operativo**
 El proceso manual depende de que una persona específica sepa ejecutarlo correctamente. Si esa persona no está disponible, la distribución se retrasa o la ejecuta alguien sin experiencia con mayor riesgo de error. La herramienta puede ser operada por cualquier miembro del equipo con acceso a los archivos de entrada.

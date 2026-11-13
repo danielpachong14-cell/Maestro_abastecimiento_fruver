@@ -1,7 +1,7 @@
 """Motor de distribución — el corazón del sistema.
 
 Distribuye el 100% de las cajas disponibles en el CEDI entre las tiendas
-elegibles de cada ítem en CUATRO fases:
+elegibles de cada ítem en CINCO fases:
 
   FASE 1 — cubrir necesidades urgentes con cap creciente por rondas:
     Ordena tiendas por prioridad (AGOTADA → SAFETY → REPOSICIÓN → CUBIERTA)
@@ -17,9 +17,25 @@ elegibles de cada ítem en CUATRO fases:
     tienda acapara cajas a costa de otras; todas reciben la misma fracción
     de su necesidad (corrección Hamilton para los residuos enteros).
     Cuando el stock SÍ alcanza, cada tienda recibe exactamente lo que necesita
-    y el verdadero sobrante va a Fase 3.
+    y el verdadero sobrante va a Fase 4.
 
-  FASE 3 — excedente VOLUNTARIO, respetando el tope de sobre-stock:
+  FASE 3 — renovación por vida útil (`_fase3_renovacion`):
+    Si el último ingreso de un ítem a una tienda fue hace MÁS días que su vida
+    útil (columna VIDA UTIL EXHIBICION de Portafolio Fruver) y la tienda aún figura con
+    inventario, lo más probable es que ese producto ya no sea vendible (vencido,
+    sin baja registrada). El motor lo cuenta como inventario y la tienda queda
+    "cubierta": la góndola se queda sin producto fresco. Esta fase le envía
+    CAJAS_RENOVACION (1) caja, solo con el sobrante que dejó la Fase 2 y solo si:
+    hay ingreso viejo con inventario, NO hay tránsito (el producto en camino ya
+    renueva), no recibió nada en Fase 1/2, ningún SKU hermano del grupo espejo
+    tiene ingreso fresco, y (opcional) la venta esperada dentro de la vida útil
+    (`consumo_diario_grupo × vida_útil`) es al menos UMBRAL_VENTA_RENOVACION
+    cajas. Hoy el umbral es 0 por decisión del negocio: toda tienda con ingreso
+    vencido recibe su caja de renovación; con un umbral > 0 las que no
+    alcanzarían a vender la caja antes de que venza se reportan en la hoja
+    «Renovación Vida Útil» sin enviarles producto.
+
+  FASE 4 — excedente VOLUNTARIO, respetando el tope de sobre-stock:
     Repartir la misma CANTIDAD DE CAJAS a tiendas con consumos muy distintos
     reparte cantidades muy distintas de DÍAS (Δdías ≈ cajas/consumo). Por eso
     el sobrante se reparte por rondas proporcional a `consumo_diario /
@@ -37,15 +53,15 @@ elegibles de cada ítem en CUATRO fases:
     resto (Δdías_i = k / días_i), cerrando la brecha en lugar de mantenerla o
     ampliarla — sin que ninguna reciba más cajas por entrega que
     MAX_CAJAS_POR_ITEM (límite de espacio en tienda). Tiendas sin consumo solo
-    reciben en Fase 1 si están AGOTADAS o en SAFETY. Fase 3 SIEMPRE respeta
+    reciben en Fase 1 si están AGOTADAS o en SAFETY. Fase 4 SIEMPRE respeta
     TOPE_EXCEDENTE: ninguna tienda recibe una caja que la deje por encima —
     puede terminar con cajas del CEDI sin repartir (`remaining > 0`), que
-    pasan a Fase 4.
+    pasan a Fase 5.
 
-  FASE 4 — red de seguridad de cero-residuo (antes "Paso B" dentro de Fase 3):
+  FASE 5 — red de seguridad de cero-residuo (antes "Paso B" dentro de Fase 4):
     Si TODAS las tiendas elegibles llegaron al tope de días o al máximo de
     cajas (caso extremo: el CEDI recibió más stock del que el portafolio
-    puede absorber sin sobre-stockearse), Fase 3 deja cajas sin asignar.
+    puede absorber sin sobre-stockearse), Fase 4 deja cajas sin asignar.
     La regla no negociable de cero residuo (todo el stock del CEDI debe
     despacharse) exige repartir ese resto de todos modos — esta fase existe
     para eso, y es la ÚNICA que puede asignarle a una tienda una caja que la
@@ -57,15 +73,15 @@ elegibles de cada ítem en CUATRO fases:
     límite. Antes de que existiera el nivel (1), el round-robin ignoraba
     MAX_CAJAS_POR_ITEM siempre, no solo como último recurso (auditoría
     2026-07: bug real confirmado en producción, ítem 2473, dos tiendas
-    terminaban con 4 cajas en vez del máximo de 3). Al separarse de Fase 3
+    terminaban con 4 cajas en vez del máximo de 3). Al separarse de Fase 4
     (auditoría 2026-09) queda visible por separado en el reporte
-    (`cajas_fase4`, columna propia en "Resumen Ítems") en vez de sumarse en
-    silencio a "Cajas Fase 3" — un ítem con mucho volumen en Fase 4 es una
+    (`cajas_fase5`, columna propia en "Resumen Ítems") en vez de sumarse en
+    silencio a "Cajas Fase 4" — un ítem con mucho volumen en Fase 5 es una
     señal de sobre-compra frente al portafolio real, no de reparto normal.
 
     Para ítems de un mismo GRUPO ESPEJO (mismo producto físico, distinto SKU —
-    ver `grupo_id` en preprocessor.py), la Fase 3 se ejecuta de forma
-    CONJUNTA (`_fase3_grupal`): elegibilidad, TOPE_EXCEDENTE y peso se
+    ver `grupo_id` en preprocessor.py), la Fase 4 se ejecuta de forma
+    CONJUNTA (`_fase4_grupal`): elegibilidad, TOPE_EXCEDENTE y peso se
     calculan sobre el inventario/consumo COMBINADO del grupo en cada tienda,
     pero cada ítem sigue entregándose desde su propio stock CEDI
     (MAX_CAJAS_POR_ITEM sigue por SKU). Si una tienda recibe sobrante del
@@ -74,10 +90,10 @@ elegibles de cada ítem en CUATRO fases:
     repartir el resto proporcional al consumo de cada SKU. Si tras esto algún
     ítem del grupo todavía tiene remanente (p. ej. recibió mucho más stock
     CEDI del que el portafolio combinado puede absorber), ese remanente se
-    delega a la Fase 4 individual de siempre (cero residuo por SKU).
+    delega a la Fase 5 individual de siempre (cero residuo por SKU).
 
   GRUPOS ESPEJO EN FASE 1/2 — el mismo problema de doble conteo que resuelve
-    la Fase 3 grupal existe en Fase 1/2: la necesidad de TARGET_DAYS se calcula
+    la Fase 4 grupal existe en Fase 1/2: la necesidad de TARGET_DAYS se calcula
     a nivel de grupo (`_apportion_grupo_targets`) y se reparte ENTERA entre los
     ítems del grupo (piso + Hamilton) en vez de redondear hacia arriba la
     necesidad de cada ítem por separado — redondear por ítem sobreprovisiona
@@ -91,12 +107,16 @@ import numpy as np
 import pandas as pd
 
 TARGET_DAYS = 3.0           # días objetivo de inventario proyectado por tienda
-MIN_STOCK_AGOTADO = 0.4     # por debajo de este STOCK (unidades) = AGOTADA
-MIN_STOCK_SAFETY = 0.7      # por debajo de este STOCK (unidades) = STOCK SEGURIDAD
+MIN_STOCK_AGOTADO = 0.4     # por debajo de este STOCK (cajas) = AGOTADA
+MIN_STOCK_SAFETY = 0.9      # por debajo de este STOCK (cajas) = STOCK SEGURIDAD
 MIN_CAJAS_INICIAL = 2       # cap de cajas por tienda en Fase 1 (por ronda)
 MAX_CAJAS_POR_ITEM = 3      # tope duro: máximo que una tienda recibe por ítem (todas las fases)
 TOPE_EXCEDENTE = 5       # máximo días que puede acumular una tienda del excedente
-UMBRAL_CONCENTRACION_SIN_CONSUMO = 5  # cajas: si Fase 4 concentraría >= esto en 1 tienda
+CAJAS_RENOVACION = 1     # Fase 3: cajas que se envían a una tienda con producto vencido por vida útil
+UMBRAL_VENTA_RENOVACION = 0.0  # Fase 3: venta esperada mínima (cajas = consumo × vida útil) para renovar;
+                               # 0 = sin umbral (decisión del negocio, nov-2026: si el ingreso supera la vida
+                               # útil SIEMPRE se renueva). Subirlo (p. ej. 0.7) evita cajas que no se alcanzarían a vender.
+UMBRAL_CONCENTRACION_SIN_CONSUMO = 5  # cajas: si Fase 5 concentraría >= esto en 1 tienda
                                        # por falta de consumo en el resto, reparto equitativo
 _EPS_DIAS_ACTUALES = 1e-3  # sustituye a días_actuales==0 al ponderar el excedente: una
                             # tienda con 0 días es la MÁS urgente y debe recibir el mayor
@@ -115,25 +135,40 @@ def _fmt_num(valor):
 
 
 def _bloqueadas(tiendas_df):
-    """Máscara booleana de filas excluidas por el tope MAX (ver preprocessor).
+    """Máscara booleana de filas excluidas del reparto normal (ver preprocessor).
 
-    Una tienda×ítem bloqueada ya tiene en existencias tanto o más de lo que
-    puede tener de ese ítem, así que no participa en Fases 1-3 ni en el nivel
-    1 de Fase 4. Solo el nivel 2 de Fase 4 (último recurso de cero residuo,
-    cuando no queda ningún otro destino) puede asignarle cajas.
+    Son DOS causas con la misma consecuencia, unificadas aguas arriba en
+    `excluida_del_reparto`:
 
-    Si el DataFrame no trae la columna (llamadas aisladas en tests con filas
-    construidas a mano), se asume que ninguna está bloqueada — así el
-    comportamiento histórico se mantiene intacto.
+      - **Tope MAX**: la tienda ya tiene en existencias + tránsito tanto o más
+        de lo que puede tener de ese ítem.
+      - **Sin datos en Celes**: la combinación no tuvo match, así que llega con
+        consumo=0/inventario=0 y se clasificaría como AGOTADA recibiendo cajas
+        precisamente porque falta el dato. Decisión de negocio: no se le envía.
+
+    Una fila excluida no participa en Fases 1-4 ni en el nivel 1 de Fase 5.
+    Solo el nivel 2 de Fase 5 (último recurso de cero residuo, cuando no queda
+    ningún otro destino) puede asignarle cajas.
+
+    Se cae a `bloqueado_por_max` si falta la columna unificada, y a "ninguna
+    bloqueada" si faltan las dos (llamadas aisladas en tests con filas
+    construidas a mano) — así el comportamiento histórico se mantiene intacto.
     """
-    if 'bloqueado_por_max' not in tiendas_df.columns:
-        return pd.Series(False, index=tiendas_df.index)
-    return tiendas_df['bloqueado_por_max'].fillna(False).astype(bool)
+    for col in ('excluida_del_reparto', 'bloqueado_por_max'):
+        if col in tiendas_df.columns:
+            return tiendas_df[col].fillna(False).astype(bool)
+    return pd.Series(False, index=tiendas_df.index)
 
 
-def _alertas_max_forzado(item_code, tiendas, forzadas):
-    """Construye las alertas de las cajas que Fase 4 tuvo que asignarle a
-    tiendas bloqueadas por su MAX porque no quedaba ningún otro destino.
+def _alertas_forzadas(item_code, tiendas, forzadas):
+    """Construye las alertas de las cajas que el nivel 2 de Fase 5 tuvo que
+    asignarle a tiendas excluidas del reparto normal porque no quedaba ningún
+    otro destino para el ítem (cero residuo manda).
+
+    El mensaje se ramifica según la causa de la exclusión (ver `_bloqueadas`):
+    superar el tope MAX, o no tener datos en Celes. Si una fila tiene las dos,
+    se reporta la falta de datos, que es la más grave: no se sabe siquiera si
+    esa tienda necesita mercancía.
 
     `forzadas` es un dict {índice de fila: cajas forzadas}. Retorna una lista
     (vacía si no hubo ninguna) — una alerta por tienda afectada.
@@ -141,23 +176,39 @@ def _alertas_max_forzado(item_code, tiendas, forzadas):
     alertas = []
     tiene_max = 'max_existencias' in tiendas.columns
     tiene_exist = 'inventario_tienda' in tiendas.columns
+    tiene_transito = 'inventario_transito' in tiendas.columns
+    tiene_sin_match = 'sin_match_celes' in tiendas.columns
     for idx, n_cajas in forzadas.items():
         max_ex = tiendas.at[idx, 'max_existencias'] if tiene_max else 0
         exist = tiendas.at[idx, 'inventario_tienda'] if tiene_exist else 0
+        transito = tiendas.at[idx, 'inventario_transito'] if tiene_transito else 0
+        store_code = tiendas.at[idx, 'store_code']
+        sin_match = bool(tiendas.at[idx, 'sin_match_celes']) if tiene_sin_match else False
+
+        if sin_match:
+            causa = 'SIN DATOS CELES'
+            detalle = 'pese a no tener datos en Celes'
+        else:
+            causa = 'MAX'
+            detalle = (
+                f'pese a superar su MAX ({_fmt_num(max_ex)}) con '
+                f'{_fmt_num(exist)} en existencias + {_fmt_num(transito)} en tránsito'
+            )
+
         alertas.append({
             'tipo': 'ADVERTENCIA',
             'item': item_code,
             'mensaje': (
-                f"Ítem {item_code}: la tienda {tiendas.at[idx, 'store_code']} "
-                f"recibió {n_cajas} caja(s) pese a superar su MAX "
-                f"({_fmt_num(max_ex)}) con {_fmt_num(exist)} en existencias — "
-                "no había ningún otro destino posible para el sobrante "
-                "(cero residuo)."
+                f'Ítem {item_code}: la tienda {store_code} recibió '
+                f'{n_cajas} caja(s) {detalle} — no había ningún otro destino '
+                'posible para el sobrante (cero residuo).'
             ),
             'cajas_forzadas': int(n_cajas),
-            'store_code': str(tiendas.at[idx, 'store_code']),
+            'causa_forzado': causa,
+            'store_code': str(store_code),
             'max_existencias': float(max_ex),
             'existencias': float(exist),
+            'transito': float(transito),
         })
     return alertas
 
@@ -317,7 +368,7 @@ def _priorizar_y_fases_1_2(cajas_disponibles, tiendas_df):
 
     Retorna (tiendas, remaining). No genera alertas — las fases 1/2 nunca
     dejan remanente "atascado" sin tiendas elegibles de forma anómala (eso
-    solo puede pasar en Fase 3); si `tiendas_df` está vacío, `remaining`
+    solo puede pasar en Fase 4); si `tiendas_df` está vacío, `remaining`
     simplemente queda igual a `cajas_disponibles`.
     """
     tiendas = tiendas_df.copy()
@@ -327,6 +378,7 @@ def _priorizar_y_fases_1_2(cajas_disponibles, tiendas_df):
     tiendas['cajas_fase2'] = 0
     tiendas['cajas_fase3'] = 0
     tiendas['cajas_fase4'] = 0
+    tiendas['cajas_fase5'] = 0
     remaining = int(cajas_disponibles)
 
     if len(tiendas) == 0:
@@ -347,9 +399,10 @@ def _priorizar_y_fases_1_2(cajas_disponibles, tiendas_df):
     # asignado. Todas las elegibles reciben su 1.ª caja antes de que cualquiera
     # reciba su 2.ª, evitando que las tiendas de alto consumo acaparen cuando
     # el stock es escaso y hay múltiples tiendas AGOTADAS.
-    # Filas excluidas por el tope MAX: no reciben en Fase 1/2 (ni en 3, ni en
-    # el nivel 1 de Fase 4). Se conservan en el DataFrame — no se separan —
-    # para que el nivel 2 de Fase 4 pueda usarlas como último recurso y para
+    # Filas excluidas del reparto (tope MAX o sin datos en Celes, ver
+    # `_bloqueadas`): no reciben en Fase 1/2 (ni en 3, ni en
+    # el nivel 1 de Fase 5). Se conservan en el DataFrame — no se separan —
+    # para que el nivel 2 de Fase 5 pueda usarlas como último recurso y para
     # que el concat final de `run_distribution` no las pierda.
     bloqueadas = _bloqueadas(tiendas)
 
@@ -385,7 +438,7 @@ def _priorizar_y_fases_1_2(cajas_disponibles, tiendas_df):
         ).clip(lower=0)
 
         # Tope por ítem: la tienda solo puede recibir hasta lo que le falta para MAX_CAJAS_POR_ITEM.
-        # Las bloqueadas por MAX quedan con room 0 — fuera del reparto.
+        # Las excluidas (MAX / sin datos Celes) quedan con room 0 — fuera del reparto.
         room = (MAX_CAJAS_POR_ITEM - tiendas['cajas_asignadas']).clip(lower=0)
         room = room.where(~bloqueadas, 0)
         needs = needs.clip(upper=room)
@@ -406,16 +459,113 @@ def _priorizar_y_fases_1_2(cajas_disponibles, tiendas_df):
     return tiendas, remaining
 
 
-def _fase3_individual(tiendas, remaining):
+_COLS_RENOVACION = ('vida_util_portafolio', 'dias_desde_ingreso',
+                    'venta_esperada_vida_util', 'grupo_con_ingreso_fresco')
+
+
+def _fase3_renovacion(estado, item_codes):
+    """FASE 3 — renovación por vida útil de UN grupo espejo (o un ítem solo).
+
+    `estado` es el dict {item_code: {'tiendas': df, 'remaining': int}} resultante
+    de Fase 1/2; `item_codes` son los ítems del grupo con stock en CEDI. Muta
+    `estado` (tablas con `cajas_asignadas`/`cajas_fase3` actualizadas y
+    `remaining` descontado) y retorna la lista de alertas.
+
+    La evaluación es por tienda × GRUPO (un ítem sin espejo es un grupo de
+    tamaño 1): una tienda es candidata si algún SKU del grupo tiene un ingreso
+    más viejo que su vida útil con inventario > 0, y además NINGÚN SKU del grupo
+    tiene tránsito, ni cajas de Fase 1/2, ni ingreso fresco. La caja se le
+    entrega al SKU de mayor `item_share_consumo` que tenga stock en CEDI y no
+    esté excluido (MAX / sin datos Celes). Si el stock no alcanza para todas las
+    candidatas se priorizan por mayor venta esperada, luego por más días de
+    vencimiento, luego por `store_code`, y se alerta cuáles quedaron sin caja.
+
+    Si las tablas no traen las columnas de renovación (tests antiguos, llamadas
+    aisladas) la fase no hace nada.
+    """
+    alertas = []
+    tablas = {
+        c: estado[c]['tiendas'].set_index('store_code', drop=False)
+        for c in item_codes
+        if len(estado[c]['tiendas']) > 0
+        and all(col in estado[c]['tiendas'].columns for col in _COLS_RENOVACION)
+    }
+    if not tablas:
+        return alertas
+    remaining = {c: int(estado[c]['remaining']) for c in tablas}
+
+    # Aunque ya no quede stock de ningún SKU del grupo se evalúan las candidatas:
+    # así quedan alertadas como "sin caja por falta de stock" en vez de omitirse.
+    candidatas = []
+    for store in sorted(set().union(*(t.index for t in tablas.values()))):
+        filas = [(c, tablas[c].loc[store]) for c in tablas if store in tablas[c].index]
+        if any(bool(r['grupo_con_ingreso_fresco']) for _, r in filas):
+            continue
+        if sum(float(r['inventario_transito']) for _, r in filas) > 0:
+            continue
+        if sum(int(r['cajas_asignadas']) for _, r in filas) > 0:
+            continue
+        viejas = [
+            r for _, r in filas
+            if r['vida_util_portafolio'] > 0
+            and r['dias_desde_ingreso'] > r['vida_util_portafolio']
+            and r['inventario_tienda'] > 0
+        ]
+        if not viejas:
+            continue
+        venta = max(float(r['venta_esperada_vida_util']) for r in viejas)
+        if venta < UMBRAL_VENTA_RENOVACION:
+            continue
+        exceso = max(float(r['dias_desde_ingreso'] - r['vida_util_portafolio']) for r in viejas)
+        candidatas.append((store, venta, exceso))
+
+    candidatas.sort(key=lambda x: (-x[1], -x[2], str(x[0])))
+    sin_stock = []
+    for store, _, _ in candidatas:
+        receptores = [
+            c for c in tablas
+            if store in tablas[c].index
+            and remaining[c] > 0
+            and not bool(_bloqueadas(tablas[c]).at[store])
+        ]
+        if not receptores:
+            sin_stock.append(str(store))
+            continue
+        receptor = min(receptores, key=lambda c: (-float(tablas[c].at[store, 'item_share_consumo']), str(c)))
+        n = min(CAJAS_RENOVACION, remaining[receptor], MAX_CAJAS_POR_ITEM)
+        tablas[receptor].at[store, 'cajas_asignadas'] += n
+        tablas[receptor].at[store, 'cajas_fase3'] += n
+        remaining[receptor] -= n
+
+    for c, t in tablas.items():
+        estado[c] = {'tiendas': t.reset_index(drop=True), 'remaining': remaining[c]}
+
+    if sin_stock:
+        alertas.append({
+            'tipo': 'ADVERTENCIA',
+            'item': sorted(tablas)[0],
+            'mensaje': (
+                f'Ítem {sorted(tablas)[0]}: {len(sin_stock)} tienda(s) con producto vencido por '
+                'vida útil quedaron sin caja de renovación por falta de stock en CEDI '
+                f'(primeras: {", ".join(sin_stock[:10])}{"…" if len(sin_stock) > 10 else ""}). '
+                'Se priorizó por mayor venta esperada; lista completa en la hoja '
+                '«Renovación Vida Útil» (motivo «Sin stock en CEDI»).'
+            ),
+            'tiendas_sin_renovar': sin_stock,
+        })
+    return alertas
+
+
+def _fase4_individual(tiendas, remaining):
     """Reparte el excedente VOLUNTARIO de UN ítem entre sus tiendas (sin ver
     otros ítems del mismo grupo espejo). Usado para ítems sin espejo y como
-    paso previo a Fase 4 cuando la Fase 3 grupal no logra colocar todo el
+    paso previo a Fase 5 cuando la Fase 4 grupal no logra colocar todo el
     remanente de un ítem específico.
 
-    A diferencia de Fase 4, esta función NUNCA le da a una tienda una caja
+    A diferencia de Fase 5, esta función NUNCA le da a una tienda una caja
     que la deje por encima de TOPE_EXCEDENTE — por diseño puede terminar con
     `remaining > 0` si todas las tiendas elegibles llegaron al tope o al
-    máximo de cajas (ver Fase 4, que se encarga de ese remanente).
+    máximo de cajas (ver Fase 5, que se encarga de ese remanente).
 
     Retorna (tiendas, remaining). No genera alertas.
     """
@@ -424,7 +574,7 @@ def _fase3_individual(tiendas, remaining):
     if len(tiendas) == 0 or remaining <= 0:
         return tiendas, remaining
 
-    # FASE 3 — excedente: repartir cada ronda proporcional a
+    # FASE 4 — excedente: repartir cada ronda proporcional a
     # `consumo_diario / días_actuales` entre las tiendas elegibles (consumo > 0,
     # bajo TOPE_EXCEDENTE tras recibir, sin alcanzar aún MAX_CAJAS_POR_ITEM).
     #
@@ -441,7 +591,8 @@ def _fase3_individual(tiendas, remaining):
     # brecha. Detalle de implementación en `_EPS_DIAS_ACTUALES` (arriba):
     # una tienda con 0 días actuales es la más urgente y debe tener el mayor
     # peso, no uno nulo.
-    # Las bloqueadas por el tope MAX no participan del excedente voluntario.
+    # Las excluidas (tope MAX / sin datos en Celes) no participan del excedente
+    # voluntario.
     con_consumo_mask = (tiendas['consumo_diario'] > 0) & ~_bloqueadas(tiendas)
 
     if con_consumo_mask.any():
@@ -488,14 +639,14 @@ def _fase3_individual(tiendas, remaining):
                     .where(elegibles_mask, 0))
             asignado = _reparto_proporcional(pesos, remaining, room)
             tiendas['cajas_asignadas'] += asignado
-            tiendas['cajas_fase3'] += asignado
+            tiendas['cajas_fase4'] += asignado
             remaining -= int(asignado.sum())
 
     return tiendas, remaining
 
 
-def _fase4_individual(item_code, tiendas, remaining):
-    """FASE 4 — red de seguridad de cero-residuo: reparte lo que Fase 3 no
+def _fase5_individual(item_code, tiendas, remaining):
+    """FASE 5 — red de seguridad de cero-residuo: reparte lo que Fase 4 no
     logró colocar sin violar TOPE_EXCEDENTE (todas las tiendas elegibles ya
     estaban en el tope de días o en MAX_CAJAS_POR_ITEM). Es la ÚNICA función
     del módulo que puede asignarle a una tienda una caja que la deje por
@@ -503,10 +654,11 @@ def _fase4_individual(item_code, tiendas, remaining):
     el stock del CEDI se despacha) tiene prioridad sobre el tope cuando ya no
     hay forma de repartir sin superarlo.
 
-    Lo mismo aplica al tope MAX por tienda×ítem: el nivel 1 excluye a las
-    tiendas bloqueadas, y solo el nivel 2 (cuando ya no queda ningún otro
-    destino) puede darles cajas, siempre al final del orden y dejando una
-    alerta por tienda que nombra el MAX y las existencias reales.
+    Lo mismo aplica a las excluidas del reparto normal (tope MAX por
+    tienda×ítem o sin datos en Celes, ver `_bloqueadas`): el nivel 1 las
+    excluye, y solo el nivel 2 (cuando ya no queda ningún otro destino) puede
+    darles cajas, siempre al final del orden y dejando una alerta por tienda
+    que nombra la causa (`_alertas_forzadas`).
 
     Retorna (tiendas, remaining, alertas_item). remaining debe terminar en 0.
     """
@@ -516,9 +668,10 @@ def _fase4_individual(item_code, tiendas, remaining):
     if len(tiendas) == 0 or remaining <= 0:
         return tiendas, remaining, alertas_item
 
-    # Las bloqueadas por el tope MAX se excluyen de todo el reparto normal de
-    # Fase 4; solo el nivel 2 (último recurso) vuelve a considerarlas, y al
-    # final del orden. Ver `_bloqueadas` y el paso 9.b del preprocessor.
+    # Las excluidas (tope MAX / sin datos en Celes) se excluyen de todo el
+    # reparto normal de Fase 5; solo el nivel 2 (último recurso) vuelve a
+    # considerarlas, y al final del orden. Ver `_bloqueadas` y los pasos 9.b y
+    # 9.c del preprocessor.
     bloqueadas = _bloqueadas(tiendas)
     con_consumo_mask = (tiendas['consumo_diario'] > 0) & ~bloqueadas
 
@@ -536,7 +689,7 @@ def _fase4_individual(item_code, tiendas, remaining):
         max_concentracion = math.ceil(remaining / n_con_consumo)
 
         if max_concentracion >= UMBRAL_CONCENTRACION_SIN_CONSUMO and n_sin_consumo > 0:
-            # El reparto normal de Fase 4 (solo tiendas con consumo>0)
+            # El reparto normal de Fase 5 (solo tiendas con consumo>0)
             # concentraría demasiadas cajas en pocas tiendas porque el
             # resto del portafolio no tiene datos de venta para este
             # ítem. En su lugar, repartir parejo entre TODAS las
@@ -544,16 +697,23 @@ def _fase4_individual(item_code, tiendas, remaining):
             tienda_concentracion = tiendas.at[order[0], 'store_code']
             remaining_original = remaining
             # El reparto equitativo cubre todas las tiendas del portafolio
-            # activo EXCEPTO las bloqueadas por MAX; si todas estuvieran
-            # bloqueadas se cae a ellas igual (cero residuo manda) y el
-            # nivel 2 de más abajo emite la alerta correspondiente.
+            # activo EXCEPTO las excluidas (MAX / sin datos en Celes); si todas
+            # estuvieran excluidas se cae a ellas igual (cero residuo manda) y
+            # el nivel 2 de más abajo emite la alerta correspondiente.
             candidatas_eq = tiendas.index[~bloqueadas]
             if len(candidatas_eq) == 0:
                 candidatas_eq = tiendas.index
             while remaining > 0:
-                idx_min = tiendas.loc[candidatas_eq, 'cajas_asignadas'].idxmin()
+                # Primero entre quienes aún no llegan a MAX_CAJAS_POR_ITEM (misma
+                # filosofía por niveles que el nivel 1/2 de más abajo); solo si
+                # todas ya están en el máximo se ignora ese límite (cero residuo).
+                pool = [i for i in candidatas_eq
+                        if tiendas.at[i, 'cajas_asignadas'] < MAX_CAJAS_POR_ITEM]
+                if not pool:
+                    pool = list(candidatas_eq)
+                idx_min = tiendas.loc[pool, 'cajas_asignadas'].idxmin()
                 tiendas.at[idx_min, 'cajas_asignadas'] += 1
-                tiendas.at[idx_min, 'cajas_fase4'] += 1
+                tiendas.at[idx_min, 'cajas_fase5'] += 1
                 remaining -= 1
             alertas_item.append({
                 'tipo': 'ADVERTENCIA',
@@ -563,8 +723,9 @@ def _fase4_individual(item_code, tiendas, remaining):
                     f"tienda(s) del portafolio tienen consumo registrado "
                     f"({n_sin_consumo} sin datos de venta) — el sobrante se iba a "
                     f"concentrar en {tienda_concentracion} (+{max_concentracion} "
-                    f"cajas). Se aplicó reparto equitativo entre las {len(tiendas)} "
-                    f"tiendas del portafolio activo. Revisar si faltan datos de "
+                    f"cajas). Se aplicó reparto equitativo entre las {len(candidatas_eq)} "
+                    f"tiendas elegibles del portafolio activo (hasta "
+                    f"{MAX_CAJAS_POR_ITEM} cajas por tienda mientras fue posible). Revisar si faltan datos de "
                     f"venta o si llegó más inventario del que la demanda real del "
                     f"ítem justifica."
                 ),
@@ -586,7 +747,7 @@ def _fase4_individual(item_code, tiendas, remaining):
             while remaining > 0 and con_espacio:
                 idx = con_espacio[i % len(con_espacio)]
                 tiendas.at[idx, 'cajas_asignadas'] += 1
-                tiendas.at[idx, 'cajas_fase4'] += 1
+                tiendas.at[idx, 'cajas_fase5'] += 1
                 remaining -= 1
                 if tiendas.at[idx, 'cajas_asignadas'] >= MAX_CAJAS_POR_ITEM:
                     con_espacio.pop(i % len(con_espacio))
@@ -600,29 +761,29 @@ def _fase4_individual(item_code, tiendas, remaining):
             # TOPE_EXCEDENTE: cero residuo tiene prioridad sobre el tope
             # cuando es la única forma de no dejar cajas sin asignar.
             #
-            # Las bloqueadas por MAX se reincorporan aquí, pero SIEMPRE al
-            # final del orden: una tienda saturada solo recibe cuando ya no
-            # existe ningún otro destino. Cada caja así asignada se registra
-            # para emitir la alerta de más abajo.
+            # Las excluidas (MAX / sin datos en Celes) se reincorporan aquí,
+            # pero SIEMPRE al final del orden: una tienda saturada o sin datos
+            # solo recibe cuando ya no existe ningún otro destino. Cada caja
+            # así asignada se registra para emitir la alerta de más abajo.
             order_n2 = order + [idx for idx in tiendas.index if bloqueadas.at[idx]]
             forzadas = {}
             i = 0
             while remaining > 0:
                 idx = order_n2[i % len(order_n2)]
                 tiendas.at[idx, 'cajas_asignadas'] += 1
-                tiendas.at[idx, 'cajas_fase4'] += 1
+                tiendas.at[idx, 'cajas_fase5'] += 1
                 if bloqueadas.at[idx]:
                     forzadas[idx] = forzadas.get(idx, 0) + 1
                 remaining -= 1
                 i += 1
 
-            alertas_item.extend(_alertas_max_forzado(item_code, tiendas, forzadas))
+            alertas_item.extend(_alertas_forzadas(item_code, tiendas, forzadas))
     else:
         # No queda ninguna tienda elegible con consumo: o ninguna tiene consumo
-        # registrado, o todas las que lo tienen están bloqueadas por su MAX.
-        # Round-robin hasta vaciar, prefiriendo las no bloqueadas; si todas lo
-        # están reciben igual — cero residuo manda — y se deja alerta por
-        # tienda, con el mismo formato que el nivel 2 de más arriba.
+        # registrado, o todas las que lo tienen están excluidas (MAX / sin datos
+        # en Celes). Round-robin hasta vaciar, prefiriendo las no excluidas; si
+        # todas lo están reciben igual — cero residuo manda — y se deja alerta
+        # por tienda, con el mismo formato que el nivel 2 de más arriba.
         indices = [idx for idx in tiendas.index if not bloqueadas.at[idx]]
         if not indices:
             indices = list(tiendas.index)
@@ -631,17 +792,17 @@ def _fase4_individual(item_code, tiendas, remaining):
         while remaining > 0 and indices:
             idx = indices[i % len(indices)]
             tiendas.at[idx, 'cajas_asignadas'] += 1
-            tiendas.at[idx, 'cajas_fase4'] += 1
+            tiendas.at[idx, 'cajas_fase5'] += 1
             if bloqueadas.at[idx]:
                 forzadas[idx] = forzadas.get(idx, 0) + 1
             remaining -= 1
             i += 1
-        alertas_item.extend(_alertas_max_forzado(item_code, tiendas, forzadas))
+        alertas_item.extend(_alertas_forzadas(item_code, tiendas, forzadas))
 
     return tiendas, remaining, alertas_item
 
 
-def _fase3_grupal(estado_items):
+def _fase4_grupal(estado_items):
     """Reparte el sobrante de un GRUPO de ítems espejo de forma conjunta.
 
     `estado_items` es un dict {item_code: {'tiendas': df, 'remaining': int}}
@@ -652,7 +813,7 @@ def _fase3_grupal(estado_items):
     Elegibilidad, TOPE_EXCEDENTE y peso (`consumo/días_actuales`) se calculan
     sobre el inventario y consumo COMBINADO del grupo en cada tienda, con el
     mismo cap de 1 caja COMBINADA del grupo por tienda por ronda que usa
-    `_fase3_individual` (ver docstring del módulo); el total repartido a una
+    `_fase4_individual` (ver docstring del módulo); el total repartido a una
     tienda en una ronda se separa luego entre los ítems del grupo presentes en
     ella, garantizando primero 1 caja a cualquier ítem que la tienda tenga en
     0 unidades (si el CEDI todavía tiene stock de él), y repartiendo el resto
@@ -678,7 +839,7 @@ def _fase3_grupal(estado_items):
 
     items_con_tiendas = [c for c in tablas if len(tablas[c]) > 0]
 
-    # FASE 3 GRUPAL — análogo a _fase3_individual, pero agregando por tienda
+    # FASE 4 GRUPAL — análogo a _fase4_individual, pero agregando por tienda
     # todos los ítems del grupo presentes en ella.
     total_remaining = sum(remaining.values())
     prev_total = total_remaining + 1
@@ -727,7 +888,7 @@ def _fase3_grupal(estado_items):
         dias_act_ponderable = dias_act.mask(dias_act <= 0, _EPS_DIAS_ACTUALES)
         pesos = (consumo_grupo / dias_act_ponderable).where(elegibles_mask, 0.0)
         # Cap de 1 caja COMBINADA del grupo por tienda por ronda — mismo
-        # mecanismo y misma razón que en _fase3_individual (ver ahí):
+        # mecanismo y misma razón que en _fase4_individual (ver ahí):
         # evita que 1-2 tiendas elegibles se lleven varias cajas de un
         # tirón sin volver a chequear TOPE_EXCEDENTE entre cada una.
         room_elig = room_store.clip(upper=1).where(elegibles_mask, 0)
@@ -738,7 +899,7 @@ def _fase3_grupal(estado_items):
             n = int(asignado_store[store])
 
             # Un ítem bloqueado por MAX en esta tienda no es candidato a
-            # recibir en Fase 3 (solo el nivel 2 de Fase 4 puede forzarlo).
+            # recibir en Fase 4 (solo el nivel 2 de Fase 5 puede forzarlo).
             candidatos = [
                 c for c in items_con_tiendas
                 if store in tablas[c].index
@@ -758,7 +919,7 @@ def _fase3_grupal(estado_items):
                 stock_item = t.at[store, 'inventario_efectivo'] + t.at[store, 'cajas_asignadas']
                 if stock_item <= 1e-9 and not bool(t.at[store, 'garantizado']):
                     t.at[store, 'cajas_asignadas'] += 1
-                    t.at[store, 'cajas_fase3'] += 1
+                    t.at[store, 'cajas_fase4'] += 1
                     t.at[store, 'garantizado'] = True
                     remaining[c] -= 1
                     n -= 1
@@ -784,14 +945,14 @@ def _fase3_grupal(estado_items):
                 if cajas <= 0:
                     continue
                 tablas[c].at[store, 'cajas_asignadas'] += int(cajas)
-                tablas[c].at[store, 'cajas_fase3'] += int(cajas)
+                tablas[c].at[store, 'cajas_fase4'] += int(cajas)
                 remaining[c] -= int(cajas)
 
         total_remaining = sum(remaining.values())
 
-    # FASE 4 — cualquier remanente por ítem (p. ej. un SKU recibió mucho más
+    # FASE 5 — cualquier remanente por ítem (p. ej. un SKU recibió mucho más
     # stock CEDI del que el portafolio combinado puede absorber) se delega a
-    # la Fase 4 individual de siempre: a estas alturas el grupo ya cumplió su
+    # la Fase 5 individual de siempre: a estas alturas el grupo ya cumplió su
     # función (evitar duplicar necesidad/excedente mientras había alternativa
     # real); lo que queda es excedente genuino de ESE SKU que debe salir
     # completo del CEDI sin importar el grupo.
@@ -802,7 +963,7 @@ def _fase3_grupal(estado_items):
             t = t.drop(columns=['garantizado']).reset_index(drop=True)
         rem = remaining[code]
         if rem > 0:
-            t, rem, alertas_item = _fase4_individual(code, t, rem)
+            t, rem, alertas_item = _fase5_individual(code, t, rem)
             alertas_por_item[code].extend(alertas_item)
         resultado[code] = {'tiendas': t, 'remaining': rem}
 
@@ -821,8 +982,12 @@ def distribuir_item(item_code, cajas_disponibles, tiendas_df):
     tiendas, remaining = _priorizar_y_fases_1_2(cajas_disponibles, tiendas_df)
     if len(tiendas) == 0:
         return tiendas, remaining, []
-    tiendas, remaining = _fase3_individual(tiendas, remaining)
-    return _fase4_individual(item_code, tiendas, remaining)
+    estado = {item_code: {'tiendas': tiendas, 'remaining': remaining}}
+    alertas_renov = _fase3_renovacion(estado, [item_code])
+    tiendas, remaining = estado[item_code]['tiendas'], estado[item_code]['remaining']
+    tiendas, remaining = _fase4_individual(tiendas, remaining)
+    tiendas, remaining, alertas_item = _fase5_individual(item_code, tiendas, remaining)
+    return tiendas, remaining, alertas_renov + alertas_item
 
 
 def run_distribution(df_merged, alertas_extra=None):
@@ -835,9 +1000,9 @@ def run_distribution(df_merged, alertas_extra=None):
     Fase 1/2 se calcula por ítem, pero con la necesidad de grupo espejo
     precalculada sobre TODO `df_merged` (`_apportion_grupo_targets`) antes de
     trocear por ítem, para que sí haya coordinación real entre ítems
-    hermanos. Fase 3 (+ Fase 4 si queda remanente) se ejecuta por ítem
-    individual para grupos de tamaño 1, o de forma conjunta (`_fase3_grupal`,
-    que delega a `_fase4_individual` el remanente por SKU) para grupos con
+    hermanos. Fase 4 (+ Fase 5 si queda remanente) se ejecuta por ítem
+    individual para grupos de tamaño 1, o de forma conjunta (`_fase4_grupal`,
+    que delega a `_fase5_individual` el remanente por SKU) para grupos con
     más de un ítem con stock CEDI disponible.
 
     Retorna (df_output, alertas):
@@ -858,25 +1023,32 @@ def run_distribution(df_merged, alertas_extra=None):
     df_merged = df_merged.copy()
 
     # Alerta agregada (una sola, no por ítem, para no saturar la hoja de
-    # Alertas): combinaciones tienda-ítem sin match en Celes se tratan con
-    # consumo=0/inventario=0 aguas abajo, lo que las clasifica como AGOTADA
-    # sin serlo necesariamente — ver preprocessor.build_distribution_df.
+    # Alertas): las combinaciones tienda-ítem sin match en Celes quedan FUERA
+    # del reparto normal (ver `_bloqueadas` y el paso 9.c del preprocessor).
+    # Llegan con consumo=0/inventario=0 por el fillna del preprocessor, así que
+    # sin esa exclusión se clasificarían como AGOTADA y recibirían su mínimo de
+    # 1 caja en Fase 1 porque falta el dato, no porque lo necesiten. El detalle
+    # fila por fila va en la hoja "Sin Datos Celes" del exporter.
     if 'sin_match_celes' in df_merged.columns:
         sin_match_mask = df_merged['sin_match_celes'].fillna(False)
         n_sin_match = int(sin_match_mask.sum())
         if n_sin_match > 0:
             pct = round(n_sin_match / len(df_merged) * 100, 1)
             n_items = df_merged.loc[sin_match_mask, 'item_code'].nunique()
+            n_tiendas = df_merged.loc[sin_match_mask, 'store_code'].nunique()
             alertas.append({
                 'tipo': 'ADVERTENCIA',
                 'item': '-',
                 'mensaje': (
                     f'{n_sin_match} combinación(es) tienda-ítem ({pct}% del total, '
-                    f'{n_items} ítem(s) afectados) no tuvieron match en Celes — se '
-                    'trataron con consumo=0 e inventario=0 (riesgo de clasificarse '
-                    'como AGOTADA sin serlo). Revisar cobertura de Celes.'
+                    f'{n_tiendas} tienda(s), {n_items} ítem(s)) no tuvieron match en '
+                    'Celes y quedaron FUERA del reparto: tienen portafolio activo '
+                    'pero sin datos de consumo/inventario no se puede saber si '
+                    'necesitan mercancía. Detalle en la hoja "Sin Datos Celes". '
+                    'Revisar cobertura de Celes.'
                 ),
                 'combos_sin_match': n_sin_match,
+                'tiendas_afectadas': int(n_tiendas),
                 'items_afectados': int(n_items),
                 'pct_del_total': pct,
             })
@@ -897,30 +1069,56 @@ def run_distribution(df_merged, alertas_extra=None):
         estado[item_code] = {'tiendas': tiendas, 'remaining': remaining}
         grupo_de_item[item_code] = group['grupo_id'].iloc[0]
 
-    # Pasada 2: Fase 3 (+ Fase 4 si queda remanente) — individual para grupos
+    # Pasada 2: Fase 4 (+ Fase 5 si queda remanente) — individual para grupos
     # de tamaño 1, conjunta para grupos con más de un ítem (productos espejo).
     items_por_grupo = {}
     for item_code, grupo_id in grupo_de_item.items():
         items_por_grupo.setdefault(grupo_id, []).append(item_code)
 
+    alertas_renovacion = []
     for grupo_id, item_codes in items_por_grupo.items():
+        # Fase 3 (renovación por vida útil) va entre Fase 2 y Fase 4, por grupo.
+        alertas_renovacion.extend(_fase3_renovacion(estado, item_codes))
         if len(item_codes) == 1:
             item_code = item_codes[0]
             est = estado[item_code]
             if len(est['tiendas']) == 0:
                 continue  # remaining queda igual; se reporta como alerta abajo
-            tiendas_result, remaining = _fase3_individual(est['tiendas'], est['remaining'])
-            tiendas_result, remaining, alertas_item = _fase4_individual(
+            tiendas_result, remaining = _fase4_individual(est['tiendas'], est['remaining'])
+            tiendas_result, remaining, alertas_item = _fase5_individual(
                 item_code, tiendas_result, remaining
             )
             estado[item_code] = {'tiendas': tiendas_result, 'remaining': remaining}
             alertas.extend(alertas_item)
         else:
             estado_grupo = {c: estado[c] for c in item_codes}
-            resultado_grupo, alertas_por_item = _fase3_grupal(estado_grupo)
+            resultado_grupo, alertas_por_item = _fase4_grupal(estado_grupo)
             for c in item_codes:
                 estado[c] = resultado_grupo[c]
                 alertas.extend(alertas_por_item[c])
+
+    # Una sola alerta resumen de las candidatas a renovación que quedaron sin caja por falta
+    # de stock (por ítem serían decenas de filas en la hoja Alertas); el detalle por tienda
+    # está en la hoja «Renovación Vida Útil».
+    sin_renovar = {a['item']: len(a['tiendas_sin_renovar'])
+                   for a in alertas_renovacion if a.get('tiendas_sin_renovar')}
+    alertas.extend(a for a in alertas_renovacion if not a.get('tiendas_sin_renovar'))
+    if sin_renovar:
+        n_combos = sum(sin_renovar.values())
+        top = sorted(sin_renovar.items(), key=lambda kv: (-kv[1], str(kv[0])))[:8]
+        alertas.append({
+            'tipo': 'ADVERTENCIA',
+            'item': '-',
+            'mensaje': (
+                f'{n_combos} tienda×ítem con producto vencido por vida útil quedaron sin caja de '
+                f'renovación por falta de stock en CEDI ({len(sin_renovar)} ítem(s); más afectados: '
+                + ', '.join(f'{i} ({n})' for i, n in top)
+                + '). Detalle en la hoja «Renovación Vida Útil» (motivo «Sin stock en CEDI»).'
+            ),
+            'combos_sin_renovar': n_combos,
+            'items_afectados': sorted(sin_renovar, key=str),
+            'detalle_por_item': {str(i): n for i, n in sorted(sin_renovar.items(), key=lambda kv: str(kv[0]))},
+        })
 
     for item_code, est in estado.items():
         remaining = est['remaining']

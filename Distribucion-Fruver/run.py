@@ -21,7 +21,7 @@ OUTPUT = ROOT / "Output"
 sys.path.insert(0, str(ROOT / "distribuidor-fruver"))
 
 from core.algorithm import run_distribution
-from core.exporter import generate_excel
+from core.exporter import generate_excel, resumen_renovacion_texto
 from core.loader import load_files
 from core.preprocessor import build_distribution_df
 
@@ -35,6 +35,8 @@ FILES = {
 }
 
 EXCLUIDAS_PATH = INPUT / "Tiendas_No generar pedido.xlsx"
+# Obligatorio: fecha del último ingreso de cada ítem a cada tienda (Fase 3, vida útil).
+INVENTARIO_TIENDAS_PATH = INPUT / "Inventario Tiendas.xlsx"
 
 log = logging.getLogger("run")
 
@@ -50,7 +52,7 @@ def _setup_logging():
 def main():
     _setup_logging()
     log.info("Cargando archivos...")
-    for key, path in FILES.items():
+    for path in [*FILES.values(), INVENTARIO_TIENDAS_PATH]:
         if not path.exists():
             log.error(f"No se encontró {path}")
             sys.exit(1)
@@ -61,7 +63,9 @@ def main():
             excluidas_file = (
                 stack.enter_context(open(EXCLUIDAS_PATH, "rb")) if EXCLUIDAS_PATH.exists() else None
             )
-            dfs = load_files(*archivos, tiendas_excluidas=excluidas_file)
+            inventario_file = stack.enter_context(open(INVENTARIO_TIENDAS_PATH, "rb"))
+            dfs = load_files(*archivos, tiendas_excluidas=excluidas_file,
+                             inventario_tiendas=inventario_file)
 
         log.info("Preprocesando datos...")
         df_merged, alertas_preproc = build_distribution_df(dfs)
@@ -84,6 +88,11 @@ def main():
     cajas_no_dist = sum(a.get("cajas_sin_distribuir", 0) for a in alertas if a["tipo"] in ("CRÍTICO", "ERROR"))
 
     log.info(f"  Ítems distribuidos : {items_dist} / {total_items}")
+    if len(df_output) and "cajas_fase3" in df_output.columns:
+        log.info(f"  Renovación vida útil (Fase 3): {int(df_output['cajas_fase3'].sum())} caja(s)")
+        resumen_renov = resumen_renovacion_texto(df_merged, df_output)
+        if resumen_renov:
+            log.info(f"  Candidatas con ingreso vencido: {resumen_renov}")
     log.info(f"  Total cajas        : {total_cajas:,}")
     log.info(f"  Existencia CEDI    : {'0 OK' if cajas_no_dist == 0 else f'ADVERTENCIA: {cajas_no_dist} cajas sin distribuir'}")
 

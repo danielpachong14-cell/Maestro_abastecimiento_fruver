@@ -20,7 +20,7 @@ pip install -r requirements.txt
 streamlit run app.py              # abre http://localhost:8501
 ```
 
-1. **Cargar archivos** — sube los 6 Excel obligatorios (+ 1 opcional):
+1. **Cargar archivos** — sube los 7 Excel obligatorios (+ 1 opcional):
 
    | Archivo | Contenido | Hoja |
    |---------|-----------|------|
@@ -35,8 +35,9 @@ streamlit run app.py              # abre http://localhost:8501
 2. **Ejecutar Distribución** — procesa y muestra métricas (ítems, cajas, existencia final)
    y alertas.
 
-3. **Descargar** — `distribucion_fruver_YYYYMMDD.xlsx` con las hojas Distribución, Resumen,
-   Resumen Ítems, Análisis Comprador y Alertas.
+3. **Descargar** — `distribucion_fruver_YYYYMMDD.xlsx` con 8 hojas: Distribución y Resumen
+   (el pedido) + Resumen Ítems, Análisis Comprador, Sin Datos Celes, Bloqueadas por MAX,
+   Renovación Vida Útil y Alertas (apoyo).
 
 ## Cómo funciona
 

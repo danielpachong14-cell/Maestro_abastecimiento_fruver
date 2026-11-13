@@ -36,11 +36,20 @@ datos de consumo o portafolio activo.
 Tope MAX por tienda×ítem: Tiendas×Ítem trae una columna `MAX` (calculada
 dentro del propio Excel con XLOOKUP contra su hoja auxiliar BD_MAX) con el
 máximo de existencias que esa tienda puede tener de ese ítem. Si
-`Existencias >= MAX` la combinación queda marcada en `bloqueado_por_max` y
-sale del reparto normal — a diferencia del inventario efectivo que usa el
-resto del pipeline, aquí se compara SOLO contra Existencias, porque el
-tránsito ya va en camino y no debe bloquear un envío. `MAX = 0` (el caso de
-casi todas las filas) significa "sin tope definido", no "no enviar".
+`Existencias + tránsito >= MAX` (es decir, `inventario_efectivo >= MAX`) la
+combinación queda marcada en `bloqueado_por_max` y sale del reparto normal.
+Antes (hasta nov-2026) se comparaba SOLO contra Existencias; se cambió a contar
+también el tránsito porque dejaba pasar sobre-stock: caso S53/ciruela 1797 con
+1.17 en existencias + 3 en tránsito = 4.17 frente a un MAX de 2 seguía
+recibiendo caja. `MAX = 0` (el caso de casi todas las filas) significa "sin tope
+definido", no "no enviar".
+
+Exclusión del reparto normal (`excluida_del_reparto`): unión de las DOS causas
+que sacan una combinación del reparto — el tope MAX de arriba y la ausencia de
+datos en Celes (`sin_match_celes`). Una tienda×ítem sin datos en Celes llega con
+consumo=0/inventario=0 y por eso se clasificaría como AGOTADA, recibiendo cajas
+precisamente porque falta el dato; el negocio decidió que no se le envíe. Las dos
+columnas de origen se conservan por separado para poder reportar la causa.
 
 `build_distribution_df` retorna `(df_merged, alertas)`: además del DataFrame
 unificado, reporta como alertas los problemas de calidad de datos detectados
@@ -148,13 +157,42 @@ def build_distribution_df(dfs):
     stock['Cant. disponible'] = pd.to_numeric(stock['Cant. disponible'], errors='coerce').fillna(0)
     stock = stock[stock['Cant. disponible'] > 0].copy()
     stock['cajas_disponibles'] = stock['Cant. disponible'].apply(math.floor)
+    # Cantidades fraccionarias: se reparten solo cajas completas, pero la parte
+    # decimal que se descarta no debe perderse en silencio.
+    fracc = stock[stock['Cant. disponible'] != stock['cajas_disponibles']]
+    if len(fracc) > 0:
+        descartado = float((fracc['Cant. disponible'] - fracc['cajas_disponibles']).sum())
+        alertas.append({
+            'tipo': 'ADVERTENCIA', 'item': '-',
+            'mensaje': f"Stock CEDI (Siesa): {len(fracc)} fila(s) con cantidad fraccionaria; "
+                       f"se redondearon hacia abajo a cajas completas y se descartaron "
+                       f"{descartado:.2f} caja(s) en total.",
+            'filas_fraccionarias': int(len(fracc)),
+            'cajas_descartadas': round(descartado, 2),
+        })
     stock = stock[stock['cajas_disponibles'] > 0]
     stock['item_key'] = _normalize_item_series(stock['Item'])
     _n_antes = len(stock)
     stock = stock.dropna(subset=['item_key'])
     _alertar_filas_descartadas(_n_antes, len(stock), 'Stock CEDI (Siesa)', alertas)
     stock['item_key'] = stock['item_key'].astype(int)
-    stock = stock.drop_duplicates(['item_key'], keep='first')
+    # Ítem repetido en Stock: se SUMAN sus cajas (toda existencia física se
+    # distribuye; conservar solo la primera fila perdía cajas sin avisar) y se
+    # alerta. Las demás columnas (descripción, U.M.) salen de la primera fila.
+    if stock['item_key'].duplicated().any():
+        sumas = stock.groupby('item_key')['cajas_disponibles'].sum()
+        repetidos = stock.loc[stock['item_key'].duplicated(keep=False), 'item_key']
+        for item_key, n_filas in repetidos.value_counts().sort_index().items():
+            alertas.append({
+                'tipo': 'ADVERTENCIA', 'item': int(item_key),
+                'mensaje': f'Ítem {int(item_key)} aparece {int(n_filas)} veces en Stock CEDI; '
+                           f'se sumaron sus cajas ({int(sumas[item_key])} en total). '
+                           'Revisar el archivo de origen.',
+                'cajas_en_cedi': int(sumas[item_key]),
+                'filas_repetidas': int(n_filas),
+            })
+        stock = stock.drop_duplicates(['item_key'], keep='first').copy()
+        stock['cajas_disponibles'] = stock['item_key'].map(sumas).astype(int)
 
     # Alerta informativa (no bloqueante): ítems con existencia cuyo ESTADO DEL
     # PRODUCTO no es exactamente ACTIVO (pruebas, dados de baja, etc.) se
@@ -224,7 +262,33 @@ def build_distribution_df(dfs):
     tiendas_item['max_existencias'] = (
         pd.to_numeric(tiendas_item['MAX'], errors='coerce').fillna(0).clip(lower=0)
     )
-    tiendas_item = tiendas_item.drop_duplicates(['COD SIESA', 'item_key'], keep='first')
+    # Pares tienda×ítem repetidos: se conserva una sola fila y, si traen MAX
+    # distintos, prevalece el MÁS RESTRICTIVO (menor MAX > 0) para no
+    # sobre-abastecer; antes ganaba la primera fila según el orden del archivo.
+    _clave = ['COD SIESA', 'item_key']
+    _rep = tiendas_item[tiendas_item.duplicated(_clave, keep=False)]
+    if len(_rep) > 0:
+        _min_pos = (
+            _rep['max_existencias'].where(_rep['max_existencias'] > 0)
+            .groupby([_rep['COD SIESA'], _rep['item_key']]).min()
+            .rename('_max_restrictivo').reset_index()
+        )
+        _n_dif = int(_rep.groupby(_clave)['max_existencias'].nunique().gt(1).sum())
+        tiendas_item = tiendas_item.drop_duplicates(_clave, keep='first').merge(
+            _min_pos, on=_clave, how='left'
+        )
+        tiendas_item['max_existencias'] = (
+            tiendas_item['_max_restrictivo'].fillna(tiendas_item['max_existencias'])
+        )
+        tiendas_item = tiendas_item.drop(columns=['_max_restrictivo'])
+        alertas.append({
+            'tipo': 'ADVERTENCIA', 'item': '-',
+            'mensaje': f'Tiendas × Ítem: {len(_min_pos)} par(es) tienda-ítem repetido(s) '
+                       f'({_n_dif} con MAX distinto); se conservó una fila por par y se '
+                       'aplicó el MAX más restrictivo. Revisar el archivo de origen.',
+            'pares_repetidos': int(len(_min_pos)),
+            'pares_con_max_distinto': _n_dif,
+        })
 
     # 4. CELES: consumos e inventarios. Se distribuye a TODAS las tiendas presentes,
     #    sin filtrar por el flag de distribución automática.
@@ -276,6 +340,23 @@ def build_distribution_df(dfs):
     merged['sin_match_celes'] = merged['_celes_match'] == 'left_only'
     merged = merged.drop(columns=['_celes_match'])
 
+    # 6.b CAUSA del sin-match, para la hoja "Sin Datos Celes" del exporter:
+    # distinguir si falta la tienda completa, el ítem completo, o solo ese par
+    # cambia por completo la acción correctiva (dar de alta una tienda en Celes
+    # no es lo mismo que revisar un par suelto). Se calcula aquí porque el Celes
+    # ya normalizado está a mano; el exporter solo copia la columna.
+    tiendas_en_celes = set(celes['cod_siesa'])
+    items_en_celes = set(celes['item_key'])
+    merged['causa_sin_match'] = np.select(
+        [
+            ~merged['sin_match_celes'],
+            ~merged['COD SIESA'].isin(tiendas_en_celes),
+            ~merged['item_key'].isin(items_en_celes),
+        ],
+        ['', 'Tienda ausente de Celes', 'Ítem ausente de todo Celes'],
+        default='Par tienda-ítem faltante',
+    )
+
     # 7. Renombrar a nombres cortos para el algoritmo.
     merged = merged.rename(columns={
         'item_key': 'item_code',
@@ -322,21 +403,43 @@ def build_distribution_df(dfs):
     # de elegibilidad, no un techo de cantidad: si NO está bloqueada participa
     # con normalidad, acotada por MAX_CAJAS_POR_ITEM como cualquier otra).
     #
-    # Se compara contra `inventario_tienda` (Existencias) a propósito, NO
-    # contra `inventario_efectivo` (Existencias + tránsito) que usa el resto
-    # del motor: el tránsito ya va en camino a la tienda y no debe impedir un
-    # envío. Decisión de negocio explícita (caso S96/1210: Existencias 5.07 +
-    # tránsito 3 = 8.07 con MAX 6 — sigue recibiendo porque 5.07 < 6).
+    # Se compara contra `inventario_efectivo` (Existencias + tránsito): lo que
+    # ya viene en camino cuenta como si estuviera en la tienda. Cambio de
+    # nov-2026 (antes solo Existencias, caso S96/1210): con solo Existencias,
+    # una tienda cuyo tránsito ya la dejaba por encima de su MAX seguía
+    # recibiendo cajas (caso S53/ciruela 1797: 1.17 + 3 = 4.17 con MAX 2).
+    # Riesgo conocido: si Celes trae el tránsito inflado o desfasado, la tienda
+    # queda bloqueada de más.
     #
-    # El corte es `>=`: con MAX 6, una tienda con 6.0 o 6.1 ya llegó a su
-    # máximo y no recibe; con 5.9 todavía entra al reparto normal.
+    # El corte es `>=`: con MAX 6, una tienda con 6.0 o 6.1 (existencias +
+    # tránsito) ya llegó a su máximo y no recibe; con 5.9 todavía entra al
+    # reparto normal.
     #
     # `max_existencias == 0` significa "sin tope definido", no "no enviar" —
     # tratarlo como bloqueo dejaría fuera casi todo el portafolio.
     merged['bloqueado_por_max'] = (
         (merged['max_existencias'] > 0)
-        & (merged['inventario_tienda'] >= merged['max_existencias'])
+        & (merged['inventario_efectivo'] >= merged['max_existencias'])
     )
+
+    # 9.c EXCLUSIÓN DEL REPARTO NORMAL: dos causas independientes con la misma
+    # consecuencia. `sin_match_celes` se suma al bloqueo por MAX porque una
+    # combinación sin datos en Celes llega con consumo=0/inventario=0 por el
+    # fillna del paso 8, lo que la clasifica como AGOTADA (priority 3) y le
+    # garantiza su mínimo de 1 caja en Fase 1 — recibiría mercancía precisamente
+    # PORQUE falta el dato, no porque la tienda esté agotada. Decisión de
+    # negocio: no se le envía.
+    #
+    # El resto del motor consulta esta columna a través de `algorithm._bloqueadas`,
+    # así que la exclusión aplica en Fases 1/2/3/4 y en el nivel 1 de Fase 5 sin
+    # tocar ninguna fase. Solo el nivel 2 de Fase 5 (cuando ya no queda ningún
+    # otro destino para el ítem) puede forzarles cajas, con alerta por tienda:
+    # cero residuo sigue siendo inviolable.
+    #
+    # Se conservan las dos columnas de origen por separado además de esta: las
+    # hojas "Sin Datos Celes" / "Bloqueadas por MAX" y la columna
+    # '# Tiendas Bloqueadas por MAX' de Análisis Comprador necesitan la causa.
+    merged['excluida_del_reparto'] = merged['bloqueado_por_max'] | merged['sin_match_celes']
 
     # 10. Restringir a tiendas activas (DB_Tiendas) y agregar su zona y nombre.
     # DB_Tiendas es la única fuente de tiendas activas: Celes y Tiendas×Ítem
@@ -357,6 +460,17 @@ def build_distribution_df(dfs):
     tiendas = dfs['tiendas'][['COD SIESA', 'NOMBRE DE LA TIENDA', 'ZONA']].copy()
     tiendas = tiendas.rename(columns={'NOMBRE DE LA TIENDA': '_nombre_tienda_maestro'})
     tiendas['COD SIESA'] = tiendas['COD SIESA'].astype(str).str.strip()
+    # Tienda repetida en el maestro: un merge 1:N duplicaría sus pedidos.
+    _dup_t = tiendas['COD SIESA'].duplicated()
+    if _dup_t.any():
+        alertas.append({
+            'tipo': 'ADVERTENCIA', 'item': '-',
+            'mensaje': f"DB_Tiendas: {int(_dup_t.sum())} fila(s) con COD SIESA repetido "
+                       f"({', '.join(sorted(tiendas.loc[_dup_t, 'COD SIESA'].unique()))}); "
+                       "se conservó la primera de cada una.",
+            'filas_repetidas': int(_dup_t.sum()),
+        })
+        tiendas = tiendas[~_dup_t]
     merged = merged.merge(tiendas, left_on='store_code', right_on='COD SIESA', how='inner')
     merged['zona'] = merged['ZONA'].fillna('').astype(str).str.strip()
     merged['store_name'] = merged['_nombre_tienda_maestro']
@@ -409,6 +523,129 @@ def build_distribution_df(dfs):
         1.0 / n_items_grupo,
     )
 
+    # 12.b RENOVACIÓN POR VIDA ÚTIL (insumos de la Fase 3 del algoritmo).
+    # La vida útil de la Fase 3 sale de VIDA UTIL EXHIBICION de Portafolio Fruver (vacía
+    # o 0 = ítem omitido) y la fecha del último ingreso de Inventario Tiendas
+    # (extracto de Siesa, una fila por ítem × bodega). Los días se cuentan contra
+    # la fecha de corte del propio archivo (su fecha de ingreso más reciente), no
+    # contra el reloj: así el resultado no cambia si se corre otro día con el
+    # mismo archivo y un archivo viejo se detecta con una alerta.
+    # Además se cargan DIAS CONSERVACION CEDI y TOTAL VIDA UTIL (opcionales): no entran al
+    # algoritmo todavía, quedan en df_merged para un análisis futuro de compras (días de
+    # vida en CEDI vs. vida útil total). TOTAL = EXHIBICION + CEDI; si llega vacío (fórmula
+    # de Excel sin recalcular) se reconstruye con esa suma.
+    def _numerica(col):
+        """(serie numérica con NaN, cantidad de celdas no numéricas) de una columna opcional."""
+        if col not in portafolio.columns:
+            return pd.Series(np.nan, index=portafolio.index), 0
+        crudo = portafolio[col]
+        num = pd.to_numeric(crudo, errors='coerce')
+        return num, int((crudo.notna() & num.isna()).sum())
+
+    _vu_ex, _bad_ex = _numerica('VIDA UTIL EXHIBICION')
+    _vu_ce, _bad_ce = _numerica('DIAS CONSERVACION CEDI')
+    _vu_to_crudo, _bad_to = _numerica('TOTAL VIDA UTIL')
+    _vu_to = _vu_to_crudo.fillna(_vu_ex + _vu_ce)
+
+    _items = portafolio['item_key']
+    _vu_map = dict(zip(_items[_vu_ex > 0], _vu_ex[_vu_ex > 0]))
+    _ce_map = dict(zip(_items[_vu_ce >= 0], _vu_ce[_vu_ce >= 0]))
+    _to_map = dict(zip(_items[_vu_to >= 0], _vu_to[_vu_to >= 0]))
+    merged['vida_util_portafolio'] = merged['item_code'].map(_vu_map).astype(float)
+    merged['vida_util_cedi'] = merged['item_code'].map(_ce_map).astype(float)
+    merged['vida_util_total'] = merged['item_code'].map(_to_map).astype(float)
+
+    _n_no_num = _bad_ex + _bad_ce + _bad_to
+    _neg = _items[(_vu_ex < 0) | (_vu_ce < 0) | (_vu_to_crudo < 0)]
+    _incons = _items[
+        _vu_to_crudo.notna() & _vu_ex.notna() & _vu_ce.notna()
+        & ((_vu_to_crudo - (_vu_ex + _vu_ce)).abs() > 1e-9)
+    ]
+    for _lista, _txt in (
+        (_neg, 'con días de vida útil negativos'),
+        (_incons, 'con TOTAL VIDA UTIL distinto de VIDA UTIL EXHIBICION + DIAS CONSERVACION CEDI'),
+    ):
+        if len(_lista) > 0:
+            alertas.append({
+                'tipo': 'ADVERTENCIA', 'item': '-',
+                'mensaje': f'Portafolio Fruver: {len(_lista)} ítem(s) {_txt} '
+                           f'({", ".join(str(int(i)) for i in sorted(_lista)[:10])}'
+                           f'{"…" if len(_lista) > 10 else ""}). Revisar el archivo.',
+                'items_afectados': [int(i) for i in sorted(_lista)],
+            })
+    if _n_no_num > 0:
+        alertas.append({
+            'tipo': 'ADVERTENCIA', 'item': '-',
+            'mensaje': f'Portafolio Fruver: {_n_no_num} celda(s) de vida útil no numéricas '
+                       '(se tratan como vacías).',
+            'celdas_no_numericas': _n_no_num,
+        })
+
+    _fecha_corte = pd.NaT
+    inv_t = dfs.get('inventario_tiendas')
+    if inv_t is not None:
+        inv_t = inv_t.copy()
+        inv_t['store_code'] = inv_t['C.O. bodega'].astype(str).str.strip()
+        inv_t['item_key'] = _normalize_item_series(inv_t['Item'])
+        inv_t['_fecha'] = pd.to_datetime(inv_t['Fecha última entrada'], errors='coerce')
+        _n_antes = len(inv_t)
+        inv_t = inv_t.dropna(subset=['item_key'])
+        _alertar_filas_descartadas(_n_antes, len(inv_t), 'Inventario Tiendas (Siesa)', alertas)
+        inv_t['item_key'] = inv_t['item_key'].astype(int)
+        _fecha_corte = inv_t['_fecha'].max()
+        # Un ítem puede aparecer en varias sub-bodegas del mismo C.O.: vale el
+        # ingreso MÁS RECIENTE (si entró mercancía a cualquiera, no está vieja).
+        _ultima = (
+            inv_t.groupby(['store_code', 'item_key'])['_fecha'].max()
+            .rename('fecha_ultimo_ingreso').reset_index()
+        )
+        merged = merged.merge(
+            _ultima, left_on=['store_code', 'item_code'],
+            right_on=['store_code', 'item_key'], how='left',
+        ).drop(columns=['item_key'])
+    else:
+        merged['fecha_ultimo_ingreso'] = pd.NaT
+    merged['fecha_ultimo_ingreso'] = pd.to_datetime(merged['fecha_ultimo_ingreso'])
+    merged['fecha_corte_inventario'] = _fecha_corte
+    merged['dias_desde_ingreso'] = (
+        (merged['fecha_corte_inventario'] - merged['fecha_ultimo_ingreso']).dt.days.astype(float)
+    )
+    merged['venta_esperada_vida_util'] = merged['consumo_diario_grupo'] * merged['vida_util_portafolio']
+
+    # Ingreso fresco por tienda × grupo espejo: si un SKU hermano entró hace menos
+    # de la vida útil del grupo, la góndola ya tiene producto fresco del mismo
+    # producto físico y no se renueva con el otro SKU.
+    _vu_grupo = merged.groupby(['store_code', 'grupo_id'])['vida_util_portafolio'].transform('max')
+    _fresco = merged['dias_desde_ingreso'].notna() & (merged['dias_desde_ingreso'] <= _vu_grupo)
+    merged['grupo_con_ingreso_fresco'] = (
+        _fresco.groupby([merged['store_code'], merged['grupo_id']]).transform('any')
+    )
+
+    if inv_t is not None:
+        if pd.isna(_fecha_corte):
+            alertas.append({
+                'tipo': 'ADVERTENCIA', 'item': '-',
+                'mensaje': 'Inventario Tiendas no trae ninguna fecha de último ingreso válida: '
+                           'la Fase 3 (renovación por vida útil) no se puede aplicar.',
+            })
+        elif _fecha_corte < pd.Timestamp.today().normalize() - pd.Timedelta(days=1):
+            alertas.append({
+                'tipo': 'ADVERTENCIA', 'item': '-',
+                'mensaje': f'Inventario Tiendas parece desactualizado: su ingreso más reciente es '
+                           f'del {_fecha_corte:%Y-%m-%d}. Los días desde el último ingreso se '
+                           'cuentan contra esa fecha; revisar que sea el extracto de hoy.',
+                'fecha_corte_inventario': f'{_fecha_corte:%Y-%m-%d}',
+            })
+        _sin_fecha = merged['vida_util_portafolio'].notna() & merged['fecha_ultimo_ingreso'].isna()
+        if _sin_fecha.any():
+            alertas.append({
+                'tipo': 'ADVERTENCIA', 'item': '-',
+                'mensaje': f'{int(_sin_fecha.sum())} combinación(es) tienda-ítem con vida útil '
+                           'definida no tienen fecha de último ingreso en Inventario Tiendas; '
+                           'no se evalúan para la renovación por vida útil.',
+                'combos_sin_fecha_ingreso': int(_sin_fecha.sum()),
+            })
+
     # 13. Ítems con stock en CEDI que no llegan a ninguna fila del DataFrame
     # final (los inner join de los pasos 5 y 10 los descartan silenciosamente
     # si no tienen ninguna tienda elegible activa) — violan la garantía de
@@ -437,8 +674,8 @@ def build_distribution_df(dfs):
             'mensaje': (
                 f'{n_bloqueadas} combinación(es) tienda-ítem quedaron fuera del '
                 f'reparto normal por el tope MAX ({n_tiendas_bloq} tienda(s), '
-                f'{n_items_bloq} ítem(s)): ya tienen en existencias tanto o más '
-                'de lo definido como máximo para ese ítem.'
+                f'{n_items_bloq} ítem(s)): ya tienen en existencias más tránsito '
+                'tanto o más de lo definido como máximo para ese ítem.'
             ),
             'combos_bloqueados': n_bloqueadas,
             'tiendas_afectadas': int(n_tiendas_bloq),
@@ -449,9 +686,13 @@ def build_distribution_df(dfs):
         'item_code', 'item_desc', 'store_code', 'store_name', 'zona',
         'consumo_diario', 'dias_inventario_actuales', 'inventario_tienda',
         'inventario_transito', 'inventario_total', 'inventario_efectivo', 'dias_proyectados',
-        'cajas_disponibles_cedi', 'um', 'vida_util', 'sin_match_celes',
-        'max_existencias', 'bloqueado_por_max',
+        'cajas_disponibles_cedi', 'um', 'vida_util',
+        'sin_match_celes', 'causa_sin_match',
+        'max_existencias', 'bloqueado_por_max', 'excluida_del_reparto',
         'grupo_id', 'consumo_diario_grupo', 'inventario_efectivo_grupo',
         'dias_proyectados_grupo', 'item_share_consumo',
+        'vida_util_portafolio', 'vida_util_cedi', 'vida_util_total',
+        'fecha_ultimo_ingreso', 'fecha_corte_inventario',
+        'dias_desde_ingreso', 'venta_esperada_vida_util', 'grupo_con_ingreso_fresco',
     ]
     return merged[cols_out].reset_index(drop=True), alertas

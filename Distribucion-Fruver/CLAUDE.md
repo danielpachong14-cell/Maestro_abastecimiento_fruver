@@ -100,11 +100,11 @@ Distribucion-Fruver/
 ## Arquitectura del pipeline
 
 ```
-6 Excel obligatorios + 1 opcional (UploadedFile o file objects)
+7 Excel obligatorios + 1 opcional (UploadedFile o file objects)
   → loader.py       valida columnas requeridas por archivo
   → preprocessor.py normaliza claves, merge → (df_merged, alertas de calidad de datos)
-  → algorithm.py    distribuye en 3 fases con prioridades → (df_output, alertas)
-  → exporter.py     genera bytes del Excel final (6 hojas, incluida Alertas)
+  → algorithm.py    distribuye en 5 fases con prioridades → (df_output, alertas)
+  → exporter.py     genera bytes del Excel final (8 hojas, incluida Alertas)
 ```
 
 Todo el procesamiento ocurre en memoria. Ningún módulo del paquete escribe a disco; solo `run.py` y el botón de descarga de `app.py` persisten archivos.
@@ -119,10 +119,21 @@ El CLAUDE.md interno documenta exhaustivamente:
 - **Grupos de productos espejo** y validación cruzada con Portafolio Fruver.
 - **Tope `MAX` por tienda × ítem**: columna calculada de
   `DB_Tiendas Por itmes y portafolio.xlsx` (XLOOKUP contra su hoja `BD_MAX`)
-  que saca del reparto normal a las tienda×ítem cuyas **Existencias** ya
-  igualan o superan ese máximo. Se compara contra Existencias, no contra el
-  inventario efectivo (el tránsito no bloquea), y `MAX = 0` significa "sin
-  tope definido".
+  que saca del reparto normal a las tienda×ítem cuyas **Existencias +
+  tránsito** (inventario efectivo) ya igualan o superan ese máximo (desde
+  nov-2026; antes solo contaba Existencias), y `MAX = 0` significa "sin tope
+  definido".
+- **Exclusión por falta de datos en Celes**: una tienda×ítem con portafolio
+  activo pero sin fila en Celes tampoco recibe — llega con consumo=0 e
+  inventario=0, así que sin esta regla se clasificaría como AGOTADA y recibiría
+  mercancía porque falta el dato. Misma mecánica que el tope `MAX`: solo el
+  nivel 2 de Fase 5 puede forzarle cajas si no queda ningún otro destino.
+- **Fase 3 — renovación por vida útil** (nov-2026): entre la Fase 2 y el excedente, envía
+  1 caja a la tienda×ítem cuyo último ingreso (`Inventario Tiendas.xlsx`, obligatorio) es
+  más viejo que su `VIDA UTIL EXHIBICION` (columna de `DB_Portafolio Fruver.xlsx`; vacía/0 = omite)
+  y aún figura con inventario, salvo tránsito, ingreso fresco de un SKU espejo o haber
+  recibido ya en Fase 1/2 (sin umbral de venta: `UMBRAL_VENTA_RENOVACION = 0`). Hoja «Renovación Vida Útil». Detalle y fundamento en
+  `distribuidor-fruver/CLAUDE.md`.
 - **Reglas no negociables**: cero residuo, solo cajas completas, no escribir a disco, alertas visibles y persistidas.
 
 ## Resuelto: contradicción sobre "Aplica para Distribución Automática?"
