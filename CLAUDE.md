@@ -84,6 +84,44 @@ Los parámetros están al inicio de `core/algorithm.py`; el código es la fuente
 Portafolio se calculan desde STATUS y el MAX de Tiendas x Item desde BD_MAX (primera coincidencia;
 sin coincidencia = DESCONTINUADO / MAX 0), así que funciona aunque Excel no haya recalculado.
 
+## Decisiones de negocio vigentes (no cambiar sin consultar)
+
+- **MAX**: se compara contra existencias + tránsito; el corte es `>= MAX`, sin redondear. Funciona como
+  interruptor (si no está bloqueada, la limita `MAX_CAJAS_POR_ITEM`) y aplica por SKU, no por grupo espejo.
+- **Sin datos en Celes**: no se le envía (llegaría como AGOTADA por falta del dato) y no se compra
+  (va a la hoja «Sin Pronóstico»).
+- Stock con estado distinto de `ACTIVO` (p. ej. PRODUCTO PRUEBA): se distribuye, pero no se compra.
+- Duplicados: en Stock se suman las cajas; en Tiendas×Ítem prevalece el MAX más restrictivo y el MIN
+  más alto; en Tiendas se conserva la primera fila. Todo con alerta.
+- `store_name` sale siempre de Tiendas, no de Celes (Celes nombra distinto algunas tiendas).
+- Las tiendas de «No generar pedido» no reciben distribución, pero sí entran a la compra (siguen vendiendo).
+- `MIN` de Tiendas x Item = exhibición en canastillas (vacío = 1). Manda la exhibición: el MIN se compra
+  aunque haya merma o consumo 0, y no lo limita la vida útil.
+- **Proyección por lotes (FIFO)**: existencias, tránsito y pedido de hoy se venden día a día desde el lote
+  más viejo; con `INVENTARIO_SEGUN_VIDA_UTIL` un lote deja de contar al pasar su vida útil, y la venta
+  que no alcanza a cubrirse se pierde. Lo que está en camino (OC + stock CEDI que no se repartió) se
+  asigna por prioridad: Agotada → Exhibición → Reposición.
+- **CADA N DIAS**: se revisa a diario. Compra N días de cobertura, sin suavizado, solo si la red llega
+  a la compra por debajo de su objetivo; si no, compra 0.
+- **OC de Siesa**: cuentan las que están en tránsito y llegan antes que la compra de hoy, y las
+  atrasadas hasta 3 días. No cuentan las cerradas, las de otra bodega, los ítems inactivos ni las
+  vencidas. «Recibida según Stock» = el Stock tiene `Fecha última entrada` posterior a la entrega,
+  porque Siesa no cierra la línea al recibir.
+- Σ compra por tienda = compra general del ítem, siempre. No se escribe ningún log en `Output/`.
+- Una corrida asume que `Input/` no cambia mientras corre: si se editan los Excel en paralelo, el
+  resultado cambia.
+
+## Pendientes
+
+1. Base de exhibición (`MIN`) por tienda. 2. Factores de venta por día de la semana (hoy 1,0).
+3. CADA N DIAS con fecha ancla, si hace falta. 4. Dos semanas en modo sombra para calibrar
+`UMBRAL_REDONDEO`, `ALFA_SUBIDA` y el MIN. 5. Validar el tratamiento del puente en el primer lunes
+festivo real (11-ene-2027).
+
+Historial completo (auditorías, casos reales, cifras de cada corrida, guía de usuario):
+`git show cfec81a:"archivo_docs/Distribucion-Fruver/distribuidor-fruver/CLAUDE.md"` (y las demás
+rutas de `archivo_docs/` en ese commit).
+
 ## Reglas que no se negocian
 
 - Cero residuo: todo el stock del CEDI se reparte. Solo cajas enteras.

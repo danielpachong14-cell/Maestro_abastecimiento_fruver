@@ -245,15 +245,17 @@ def test_fase5_activa_y_reparte_por_menor_dias_actuales():
     niveles: primero solo tiendas bajo MAX_CAJAS_POR_ITEM y, si es inevitable, ignorando
     ese tope (ítem 2473: antes lo ignoraba siempre).
 
-      P: consumo=2.0, existencias=0   → AGOTADA; en Fase 1+2 llega a su tope de 3 cajas.
-      Q: consumo=1.0, existencias=6.0 → CUBIERTA; ya en TOPE_EXCEDENTE, inelegible para Fase 4.
+      P: consumo=2.0, existencias=0 → AGOTADA; en Fase 1+2 llega a su tope de 3 cajas.
+      Q: consumo=1.0, existencias=TOPE_EXCEDENTE+1 → CUBIERTA y sobre el tope de días,
+         inelegible para Fase 4.
 
     Ninguna es elegible para Fase 4. El nivel 1 le da a Q las 3 que le faltan; ambas quedan
     en MAX_CAJAS_POR_ITEM y sobran 2, que el nivel 2 reparte 1 y 1 (no las apila sobre una).
     Resultado: P y Q terminan empatadas en 4 cajas.
     """
+    _dias_q = TOPE_EXCEDENTE + 1.0
     p = _store('P', consumo=2.0, dias=0.0, existencias=0.0)
-    q = _store('Q', consumo=1.0, dias=6.0, existencias=6.0)
+    q = _store('Q', consumo=1.0, dias=_dias_q, existencias=_dias_q)
     tiendas, remaining, _ = distribuir_item('X', 8, _df([p, q], cajas=8))
     assert remaining == 0
     assert int(tiendas['cajas_asignadas'].sum()) == 8
@@ -464,12 +466,12 @@ def test_grupo_espejo_no_duplica_reposicion():
         'inventario_efectivo': 1.0,
         'priority': 0,
         'consumo_diario_grupo': 1.0,
-        'inventario_efectivo_grupo': 3.0,
+        'inventario_efectivo_grupo': TARGET_DAYS * 1.0,
         'dias_proyectados_grupo': TARGET_DAYS,
         'item_share_consumo': 0.5,
     })
     from core.algorithm import _calc_deseadas, get_priority
-    assert get_priority(row) == 0, "Grupo cubierto (3.0 dias == TARGET_DAYS) -> prioridad CUBIERTA"
+    assert get_priority(row) == 0, "Grupo cubierto (dias_grupo == TARGET_DAYS) -> prioridad CUBIERTA"
     assert _calc_deseadas(row, cap=3) == 0, (
         "El grupo ya está cubierto; el ítem A no debía pedir reposición aunque "
         "visto solo (1.0 caja / 0.5 consumo = 2.0 días) sí la pediría con la "
@@ -603,20 +605,20 @@ def test_grupo_espejo_multiple_no_sobreprovisiona_por_doble_ceil():
     1.0 caja: `ceil()` por ítem sumaba 3 cajas en Fase 1 donde el grupo necesitaba 1.
     Vía `run_distribution`, Fase 1+2 del grupo no debe exceder `ceil(necesidad_grupo)`.
     """
-    stores = ['T']
+    inv_grupo = TARGET_DAYS - 1.0  # con consumo de grupo 1.0 → necesidad de grupo = 1.0 caja
     rows = []
     for item_code, share in [('A', 1 / 3), ('B', 1 / 3), ('C', 1 / 3)]:
         rows.append({
             'store_code': 'T', 'item_code': item_code, 'grupo_id': 'GESPEJO',
             'consumo_diario': 1.0 / 3, 'consumo_diario_grupo': 1.0,
-            'inventario_efectivo': 0.0, 'inventario_efectivo_grupo': 2.0,
-            'dias_proyectados': 0.0, 'dias_proyectados_grupo': 2.0,
+            'inventario_efectivo': 0.0, 'inventario_efectivo_grupo': inv_grupo,
+            'dias_proyectados': 0.0, 'dias_proyectados_grupo': inv_grupo,
             'item_share_consumo': share,
             'cajas_disponibles_cedi': 5, 'store_name': 'T', 'um': 'UND',
             'item_desc': f'Producto {item_code}',
         })
     df_merged = pd.DataFrame(rows)
-    # necesidad_grupo = max(0, 3.0*1.0 - 2.0) = 1.0 -> ceil = 1 caja total para el grupo.
+    # necesidad_grupo = max(0, TARGET_DAYS*1.0 - inv_grupo) = 1.0 -> ceil = 1 caja total para el grupo.
     df_output, alertas = run_distribution(df_merged)
 
     total_fase1_fase2 = int((df_output['cajas_fase1'] + df_output['cajas_fase2']).sum())
