@@ -1,19 +1,14 @@
-# macOS
-.DS_Store
-._*
-
-# Temporales de Office
-~$*
-
-# Python (distribuidor-fruver/ trae su propio .gitignore para venv/, __pycache__/, etc.)
+# Entorno y cachés de Python
+.venv/
+venv/
 __pycache__/
 .pytest_cache/
 *.pyc
 
-# Ejecutable del proyecto y artefactos de PyInstaller (generados, no versionados)
-*.exe
-build/
-*.spec
+# Resultados de cada corrida (se quedan solo en local)
+Output/
 
-# Accesos directos de Windows (apuntan a rutas locales de cada PC)
-*.lnk
+# Temporales de Office y del sistema
+~$*
+.DS_Store
+._*
