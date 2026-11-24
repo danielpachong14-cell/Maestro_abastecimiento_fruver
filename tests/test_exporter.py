@@ -361,8 +361,8 @@ def test_resumen_items_lleva_leyenda_de_una_linea_y_sin_columnas_de_sobreenvio()
     ri = pd.read_excel(io.BytesIO(excel), sheet_name='Resumen Ítems', header=2)
     assert not any('Forzado' in c for c in ri.columns)
     from core.algorithm import TARGET_DAYS
-    assert list(ri.columns) == ['Código Ítem', 'Nombre Ítem', 'Total Cajas', 'F1 Urgentes',
-                                f'F2 Cobertura {TARGET_DAYS:g}d', 'F3 Renovación', 'F4 Excedente']
+    assert list(ri.columns) == ['Código Ítem', 'Nombre Ítem', 'Total Cajas', f'F1 Cobertura {TARGET_DAYS:g}d',
+                                'F2 Agotadas', 'F3 Renovación', 'F4 Excedente']
 
 
 def test_hojas_de_analisis_tienen_encabezado_fijo_y_filtros():

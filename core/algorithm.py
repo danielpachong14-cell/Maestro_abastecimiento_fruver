@@ -1,5 +1,6 @@
 """Motor de distribución: reparte el 100 % de las cajas del CEDI entre las tiendas elegibles de cada
-ítem en 5 fases (urgentes, completar TARGET_DAYS, renovación por vida útil, excedente, cero residuo).
+ítem en 5 fases (completar TARGET_DAYS por venta, garantizar agotado/seguridad, renovación por vida
+útil, excedente, cero residuo).
 Grupos espejo: la necesidad y el excedente se calculan por grupo. Detalle en CLAUDE.md.
 """
 
@@ -12,14 +13,14 @@ import pandas as pd
 # >>> PARÁMETROS EDITABLES (cambia solo el número; todo el código y los tests
 # >>> leen estas constantes, no hay valores duplicados en otro lado)
 # =============================================================================
-TOPE_EXCEDENTE = 7          # <<< TOPE DE DÍAS: máximo de días de inventario que una tienda puede
+TOPE_EXCEDENTE = 8          # <<< TOPE DE DÍAS: máximo de días de inventario que una tienda puede
                             #     acumular al recibir el SOBRANTE del CEDI (Fases 4/5). Ninguna tienda
                             #     recibe una caja que la deje por encima de este valor.
-TARGET_DAYS = 4.0           # días objetivo de inventario proyectado por tienda (Fases 1/2)
+TARGET_DAYS = 5.0           # días objetivo de inventario proyectado por tienda (Fase 1)
 MAX_CAJAS_POR_ITEM = 3      # tope duro: máximo que una tienda recibe por ítem (todas las fases)
-MIN_CAJAS_INICIAL = 2       # cap de cajas por tienda en Fase 1 (por ronda)
-MIN_STOCK_AGOTADO = 0.4     # por debajo de este STOCK (cajas) = AGOTADA
-MIN_STOCK_SAFETY = 0.9      # por debajo de este STOCK (cajas) = STOCK SEGURIDAD
+MIN_CAJAS_INICIAL = 2       # máximo de cajas por tienda en Fase 1 (completar TARGET_DAYS, por rondas)
+MIN_STOCK_AGOTADO = 0.3     # por debajo de este STOCK (cajas) = AGOTADA
+MIN_STOCK_SAFETY = 0.7      # por debajo de este STOCK (cajas) = STOCK SEGURIDAD
 # =============================================================================
 
 CAJAS_RENOVACION = 1     # Fase 3: cajas que se envían a una tienda con producto vencido por vida útil
@@ -137,7 +138,7 @@ def _compute_priority(tiendas_df):
 
 
 def _apportion_grupo_targets(tiendas_df):
-    """Cajas necesarias en Fase 1/2 para que el GRUPO espejo de cada
+    """Cajas necesarias en Fase 1 para que el GRUPO espejo de cada
     (store_code, grupo_id) alcance TARGET_DAYS, repartidas entre sus ítems con
     piso + Hamilton (`_reparto_proporcional`).
 
@@ -163,21 +164,21 @@ def _apportion_grupo_targets(tiendas_df):
 
 
 def _calc_deseadas(row, cap):
-    """Cajas que la tienda querría recibir, limitadas por el cap del pase.
+    """Fase 1: cajas que la tienda querría recibir para llegar a TARGET_DAYS,
+    limitadas por el cap de la ronda. Sin piso por prioridad: garantizar la caja
+    de la Agotada/Seguridad es tarea de la Fase 2.
 
     Lee `cajas_target_grupo` (ver `_apportion_grupo_targets`); si la fila no la
     trae (llamadas aisladas en tests) la recalcula, con el mismo resultado para
     un ítem sin espejo. Consumo e inventario ya están en cajas.
     """
     if row.consumo_diario <= 0:
-        # Sin consumo: no se puede proyectar demanda; mínimo según prioridad.
-        return 1 if row.priority >= 2 else 0
+        return 0  # sin consumo no se proyecta demanda (la Fase 2 cubre si está agotada)
     cajas_target = getattr(row, 'cajas_target_grupo', None)
     if cajas_target is None:
         necesidad_grupo = max(0.0, TARGET_DAYS * row.consumo_diario_grupo - row.inventario_efectivo_grupo)
         cajas_target = math.ceil(necesidad_grupo * row.item_share_consumo)
-    min_boxes = 1 if row.priority >= 2 else 0
-    return max(min_boxes, min(int(cajas_target), cap))
+    return max(0, min(int(cajas_target), cap))
 
 
 def _reparto_proporcional(pesos, total, room):
@@ -240,17 +241,20 @@ def _priorizar_y_fases_1_2(cajas_disponibles, tiendas_df):
     if 'cajas_target_grupo' not in tiendas.columns:
         tiendas['cajas_target_grupo'] = _apportion_grupo_targets(tiendas)
 
-    # Orden: prioridad DESC, consumo DESC; store_code desempata de forma determinista.
+    # Orden: mayor consumo primero (sin mirar el nivel de prioridad); store_code
+    # desempata de forma determinista.
     tiendas = tiendas.sort_values(
-        ['priority', 'consumo_diario', 'store_code'], ascending=[False, False, True]
+        ['consumo_diario', 'store_code'], ascending=[False, True]
     ).reset_index(drop=True)
 
-    # FASE 1 — rondas con cap creciente (1 → MIN_CAJAS_INICIAL): en cada ronda la
-    # tienda recibe el delta entre deseadas(cap) y lo ya asignado.
     # Las excluidas (ver `_bloqueadas`) no reciben en Fases 1-3 ni en el nivel 1
     # de Fase 5, pero se conservan en el DataFrame para el nivel 2 y el concat final.
     bloqueadas = _bloqueadas(tiendas)
 
+    # FASE 1 — completar TARGET_DAYS, por venta: rondas con cap creciente
+    # (1 → MIN_CAJAS_INICIAL). En cada ronda, de mayor a menor consumo, la tienda
+    # recibe el delta entre deseadas(cap) y lo ya asignado: todas las que lo
+    # necesitan reciben su 1.ª caja antes de que alguna reciba la 2.ª.
     for cap in range(1, MIN_CAJAS_INICIAL + 1):
         if remaining <= 0:
             break
@@ -266,33 +270,22 @@ def _priorizar_y_fases_1_2(cajas_disponibles, tiendas_df):
             tiendas.at[idx, 'cajas_fase1'] += asignar
             remaining -= asignar
 
-    # FASE 2 — completar TARGET_DAYS: si el stock alcanza cada tienda recibe su
-    # necesidad; si no, la escasez se reparte proporcional (Hamilton).
-    if remaining > 0:
-        con_consumo = tiendas['consumo_diario'] > 0
-        needs = pd.Series(0.0, index=tiendas.index)
-        needs[con_consumo] = (
-            (
-                TARGET_DAYS * tiendas.loc[con_consumo, 'consumo_diario_grupo']
-                - tiendas.loc[con_consumo, 'inventario_efectivo_grupo']
-            ).clip(lower=0) * tiendas.loc[con_consumo, 'item_share_consumo']
-            - tiendas.loc[con_consumo, 'cajas_asignadas']
-        ).clip(lower=0)
-
-        # Tope por ítem: hasta lo que falta para MAX_CAJAS_POR_ITEM; excluidas con room 0.
-        room = (MAX_CAJAS_POR_ITEM - tiendas['cajas_asignadas']).clip(lower=0)
-        room = room.where(~bloqueadas, 0)
-        needs = needs.clip(upper=room)
-
-        total_need = needs.sum()
-
-        if total_need > 0:
-            # min(remaining, total_need): `_reparto_proporcional` reparte proporcional
-            # a `needs` sin exceder `room`.
-            asignado = _reparto_proporcional(needs, min(remaining, total_need), room)
-            tiendas['cajas_asignadas'] += asignado
-            tiendas['cajas_fase2'] += asignado
-            remaining -= int(asignado.sum())
+    # FASE 2 — garantizar el agotado: con lo que sobre, 1 caja a cada tienda que
+    # salió de la Fase 1 sin nada. Primero TODAS las AGOTADAS (prioridad 3) y,
+    # si aún sobra, las de STOCK DE SEGURIDAD (prioridad 2); mayor consumo primero
+    # (el DataFrame ya viene en ese orden).
+    for nivel in (3, 2):
+        if remaining <= 0:
+            break
+        candidatas = tiendas.index[
+            (tiendas['priority'] == nivel) & (tiendas['cajas_asignadas'] == 0) & ~bloqueadas
+        ]
+        for idx in candidatas:
+            if remaining <= 0:
+                break
+            tiendas.at[idx, 'cajas_asignadas'] += 1
+            tiendas.at[idx, 'cajas_fase2'] += 1
+            remaining -= 1
 
     return tiendas, remaining
 

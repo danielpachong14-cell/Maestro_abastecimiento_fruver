@@ -278,7 +278,7 @@ def _build_alertas_sheet(alertas):
 
 
 def _resumen_items(d):
-    cols = ['Código Ítem', 'Nombre Ítem', 'Total Cajas', 'F1 Urgentes', f'F2 Cobertura {TARGET_DAYS:g}d',
+    cols = ['Código Ítem', 'Nombre Ítem', 'Total Cajas', f'F1 Cobertura {TARGET_DAYS:g}d', 'F2 Agotadas',
             'F3 Renovación', 'F4 Excedente']
     if d is None:
         return pd.DataFrame(columns=cols)
@@ -372,7 +372,7 @@ def generate_excel(df_output, alertas=None, df_merged=None):
 
         ws_ri = writer.sheets['Resumen Ítems']
         ws_ri.cell(row=1, column=1, value=(
-            f'F1 Urgentes (agotadas / seguridad) · F2 Cobertura a {TARGET_DAYS:g} días · F3 Renovación por vida útil · '
+            f'F1 Cobertura a {TARGET_DAYS:g} días (por venta) · F2 Agotadas / seguridad · F3 Renovación por vida útil · '
             'F4 Excedente voluntario.'
         ))
 

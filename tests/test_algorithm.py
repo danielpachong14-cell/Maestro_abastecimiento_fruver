@@ -7,6 +7,7 @@ import pytest
 
 from core.algorithm import (
     MAX_CAJAS_POR_ITEM,
+    MIN_CAJAS_INICIAL,
     MIN_STOCK_AGOTADO,
     MIN_STOCK_SAFETY,
     TARGET_DAYS,
@@ -245,7 +246,7 @@ def test_fase5_activa_y_reparte_por_menor_dias_actuales():
     niveles: primero solo tiendas bajo MAX_CAJAS_POR_ITEM y, si es inevitable, ignorando
     ese tope (ítem 2473: antes lo ignoraba siempre).
 
-      P: consumo=2.0, existencias=0 → AGOTADA; en Fase 1+2 llega a su tope de 3 cajas.
+      P: consumo=2.0, existencias=0 → AGOTADA; Fase 1 le da 2 (su máximo) y Fase 4 la 3.ª.
       Q: consumo=1.0, existencias=TOPE_EXCEDENTE+1 → CUBIERTA y sobre el tope de días,
          inelegible para Fase 4.
 
@@ -274,11 +275,11 @@ def test_fase5_activa_y_reparte_por_menor_dias_actuales():
         f"recibió {q_row['cajas_asignadas']}"
     )
 
-    # Q no llegó a competir en Fase 4 (ya arrancaba en el tope de días) y
-    # P se quedó en Fase 1+2 (0 de Fase 4) — toda su asignación restante
-    # vino de Fase 5 (nivel 1 + nivel 2).
+    # Q no llegó a competir en Fase 4 (ya arrancaba en el tope de días). P recibe
+    # 2 en Fase 1 (MIN_CAJAS_INICIAL) y la 3.ª en Fase 4; el resto vino de Fase 5.
     assert q_row['cajas_fase4'] == 0, "Q no debía recibir nada en Fase 4 (inelegible desde la ronda 1)"
-    assert p_row['cajas_fase4'] == 0, "P no debía recibir nada en Fase 4 (ya en tope de cajas tras Fase 1+2)"
+    assert p_row['cajas_fase1'] == MIN_CAJAS_INICIAL, "P debía recibir su máximo de Fase 1"
+    assert p_row['cajas_fase4'] == 1, "P debía completar su tope de cajas con 1 caja de Fase 4"
     assert q_row['cajas_fase5'] == 4, "Q debía recibir 4 cajas en Fase 5 (nivel 1 + nivel 2)"
     assert p_row['cajas_fase5'] == 1, "P solo debía recibir 1 caja en Fase 5 (nivel 2)"
 
@@ -351,7 +352,7 @@ def test_paso_b_respeta_max_cajas_por_item_si_hay_otra_tienda_con_espacio():
     """Fase 5 respeta MAX_CAJAS_POR_ITEM si hay otra tienda con espacio (ítem 2473:
     antes seguía apilando sobre una tienda que ya tenía su máximo).
 
-      P: consumo=2.0, existencias=0   → AGOTADA; llega a su tope de cajas en Fase 1+2.
+      P: consumo=2.0, existencias=0   → AGOTADA; llega a su tope de cajas en Fase 1 + Fase 4.
       Q: consumo=1.0, existencias=6.0 → CUBIERTA, ya en el tope de días, con espacio de cajas.
       R: consumo=0.5, existencias=3.0 → CUBIERTA, ya en el tope de días, con espacio de cajas.
 
@@ -993,7 +994,7 @@ def _store_r(code, consumo, existencias, vu=5.0, dias_ing=8.0, transito=0.0, fre
     """Tienda con ingreso viejo: por defecto 8 días desde el último ingreso para
     un ítem de 5 días de vida útil, con 1.5 cajas aún en inventario. Con
     consumo 0.3 → venta esperada en vida útil = 1.5 cajas (>= umbral 0.7). La
-    tienda no es prioritaria (≥ 0.9 cajas y ≥ 3 días), así que Fase 1/2 no le da nada."""
+    tienda no es prioritaria (≥ MIN_STOCK_SAFETY y ≥ TARGET_DAYS), así que Fase 1/2 no le da nada."""
     s = _store(code, consumo, dias=existencias / consumo if consumo else float('inf'),
                existencias=existencias, transito=transito)
     s.update(
@@ -1257,3 +1258,61 @@ def test_fase3_limite_con_vida_util_5_se_envia_a_los_6_dias_y_no_antes():
     for dias, cajas in esperado.items():
         t, _, _ = distribuir_item('X', 1, _df([_store_r('R', 0.3, 1.5, vu=5.0, dias_ing=dias)], cajas=1))
         assert _renovadas(t) == {'R': cajas}, f'días={dias}'
+
+
+# ---------------------------------------------------------------------------
+# Fase 1 (completar TARGET_DAYS por venta) y Fase 2 (garantizar agotado)
+# ---------------------------------------------------------------------------
+
+def _por_tienda(tiendas):
+    return tiendas.set_index('store_code')
+
+
+def test_fase1_escasez_prioriza_mayor_venta_y_reparte_por_rondas():
+    """Con 3 cajas y tres tiendas que necesitan 2 cada una, la ronda 1 da 1 caja
+    a cada una (de mayor a menor venta) antes de que alguna reciba la 2.ª; con 2
+    cajas, se quedan las dos que más venden."""
+    filas = [_store('BAJA', 0.5, 1.0, existencias=0.5),     # necesita 2.5 - 0.5 = 2
+             _store('ALTA', 2.0, 4.0, existencias=8.5),   # necesita 10 - 8.5 = 1.5 → 2
+             _store('MEDIA', 1.0, 3.0, existencias=3.5)]  # necesita 5 - 3.5 = 1.5 → 2
+    t, _, _ = distribuir_item('X', 3, _df(filas, cajas=3))
+    assert _por_tienda(t)['cajas_fase1'].to_dict() == {'ALTA': 1, 'MEDIA': 1, 'BAJA': 1}
+
+    t, _, _ = distribuir_item('X', 2, _df(filas, cajas=2))
+    assert _por_tienda(t)['cajas_fase1'].to_dict() == {'ALTA': 1, 'MEDIA': 1, 'BAJA': 0}
+
+
+def test_fase1_no_pasa_de_min_cajas_iniciales():
+    """Aunque una tienda necesite muchas cajas para llegar a TARGET_DAYS, en Fase 1
+    no recibe más de MIN_CAJAS_INICIAL."""
+    t, _, _ = distribuir_item('X', 20, _df([_store('A', 5.0, 0.0)], cajas=20))
+    assert int(t.iloc[0]['cajas_fase1']) == MIN_CAJAS_INICIAL
+
+
+def test_fase1_va_antes_que_la_agotada():
+    """Con 1 sola caja, va a la tienda que más vende aunque la otra esté AGOTADA
+    y venda menos: la Fase 1 manda por venta, la Fase 2 solo usa el sobrante."""
+    filas = [_store('AGOT', 0.2, 0.0, existencias=0.0),
+             _store('GRANDE', 2.0, 3.0, existencias=6.0)]
+    t, _, _ = distribuir_item('X', 1, _df(filas, cajas=1))
+    por = _por_tienda(t)
+    assert int(por.loc['GRANDE', 'cajas_fase1']) == 1
+    assert int(por.loc['AGOT', 'cajas_asignadas']) == 0
+
+
+def test_fase2_garantiza_primero_agotada_y_luego_seguridad():
+    """Tiendas sin consumo no reciben en Fase 1. Con 1 caja sobrante va a la
+    AGOTADA; con 2, también a la de SEGURIDAD."""
+    agot = _store('AGOT', 0.0, 0.0, existencias=0.0)
+    seg = _store('SEG', 0.0, 0.0, existencias=(MIN_STOCK_AGOTADO + MIN_STOCK_SAFETY) / 2)
+    t, _, _ = distribuir_item('X', 1, _df([seg, agot], cajas=1))
+    assert _por_tienda(t)['cajas_fase2'].to_dict() == {'SEG': 0, 'AGOT': 1}
+
+    t, _, _ = distribuir_item('X', 2, _df([seg, agot], cajas=2))
+    assert _por_tienda(t)['cajas_fase2'].to_dict() == {'SEG': 1, 'AGOT': 1}
+
+
+def test_fase2_no_da_otra_caja_a_quien_ya_recibio_en_fase1():
+    t, _, _ = distribuir_item('X', 5, _df([_store('A', 1.0, 0.0)], cajas=5))
+    fila = t.iloc[0]
+    assert int(fila['cajas_fase1']) == MIN_CAJAS_INICIAL and int(fila['cajas_fase2']) == 0

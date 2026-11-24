@@ -41,21 +41,22 @@ escribe a disco. `loader.load_files` (archivos maestros sueltos) solo se conserv
 
 - `inventario_efectivo = existencias + tránsito` de Celes (no «(=) Inventario Total», que viene
   inflado). `dias_proyectados = inventario_efectivo / consumo_diario`. Todo en **cajas enteras**.
-- Prioridad por grupo espejo: AGOTADA (< `MIN_STOCK_AGOTADO` = 0.4 cajas) → SAFETY (< 0.9) →
-  REPOSICIÓN (< `TARGET_DAYS` = 4 días) → CUBIERTA; dentro de cada nivel, mayor consumo primero.
+- Prioridad por grupo espejo: AGOTADA (< `MIN_STOCK_AGOTADO` = 0.3 cajas) → SAFETY (< 0.7) →
+  REPOSICIÓN (< `TARGET_DAYS` = 5 días) → CUBIERTA. La Fase 1 ordena solo por consumo (mayor
+  primero); los niveles AGOTADA/SAFETY los usa la Fase 2.
 - **Excluidas del reparto normal**: `bloqueado_por_max` (existencias + tránsito ≥ `MAX` de
   Tiendas×Ítem; `MAX = 0` = sin tope) y `sin_match_celes` (sin fila en Celes). Solo la Fase 5 nivel 2
   puede darles cajas, si no queda otro destino. Se listan en la hoja Novedades.
 
 | Fase | Qué hace |
 |---|---|
-| 1 | Rondas con cap creciente (1 → `MIN_CAJAS_INICIAL` = 2): todas reciben su 1.ª caja antes que alguien la 2.ª |
-| 2 | Completar `TARGET_DAYS`; si no alcanza, reparto proporcional a la necesidad (Hamilton) |
+| 1 | Completar `TARGET_DAYS`, por venta: de mayor a menor consumo, en rondas (todas reciben su 1.ª caja antes que alguien la 2.ª), máximo `MIN_CAJAS_INICIAL` = 2 cajas por tienda |
+| 2 | Garantizar el agotado: con lo que sobre, 1 caja a cada tienda que salió de F1 con 0 cajas: primero todas las AGOTADAS, luego las de SAFETY (mayor consumo primero) |
 | 3 | Renovación por vida útil: 1 caja (`CAJAS_RENOVACION`) si el último ingreso es más viejo que `VIDA UTIL EXHIBICION` y aún hay inventario; no si hay tránsito, ya recibió en F1/F2 o un SKU espejo tiene ingreso fresco |
-| 4 | Excedente: 1 caja por tienda por ronda, peso `consumo / días_actuales`, sin pasar `TOPE_EXCEDENTE` = 7 días ni `MAX_CAJAS_POR_ITEM` = 3 |
+| 4 | Excedente: 1 caja por tienda por ronda, peso `consumo / días_actuales`, sin pasar `TOPE_EXCEDENTE` = 8 días ni `MAX_CAJAS_POR_ITEM` = 3 |
 | 5 | Cero residuo: lo que quede se reparte igual (única fase que supera el tope). Mucho volumen aquí = sobre-compra |
 
-Grupos espejo (hoja Espejo): la necesidad de F1/F2 y la elegibilidad/peso de F4 se calculan con el
+Grupos espejo (hoja Espejo): la necesidad de F1 y la elegibilidad/peso de F4 se calculan con el
 inventario y consumo combinado del grupo; cada SKU sale de su propio stock.
 Los parámetros están al inicio de `core/algorithm.py`; el código es la fuente de verdad.
 
@@ -88,6 +89,9 @@ sin coincidencia = DESCONTINUADO / MAX 0), así que funciona aunque Excel no hay
 
 - **MAX**: se compara contra existencias + tránsito; el corte es `>= MAX`, sin redondear. Funciona como
   interruptor (si no está bloqueada, la limita `MAX_CAJAS_POR_ITEM`) y aplica por SKU, no por grupo espejo.
+- **Orden Fase 1 / Fase 2** (24-nov-2026): primero las que más venden (F1, completar 5 días) y luego
+  agotado → seguridad (F2, solo con el sobrante). Aceptado que, con stock escaso, tiendas pequeñas
+  agotadas o en seguridad queden sin caja (simulación del 23-nov: 69 agotadas sin caja vs 16 antes).
 - **Sin datos en Celes**: no se le envía (llegaría como AGOTADA por falta del dato) y no se compra
   (va a la hoja «Sin Pronóstico»).
 - Stock con estado distinto de `ACTIVO` (p. ej. PRODUCTO PRUEBA): se distribuye, pero no se compra.

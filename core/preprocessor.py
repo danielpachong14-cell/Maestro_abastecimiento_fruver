@@ -316,7 +316,7 @@ def build_distribution_df(dfs):
     )
 
     # 9.c EXCLUSIÓN DEL REPARTO NORMAL: tope MAX o sin datos en Celes. Sin datos
-    # llegaría como AGOTADA y recibiría 1 caja en Fase 1 solo por faltar el dato;
+    # llegaría como AGOTADA y recibiría 1 caja en Fase 2 solo por faltar el dato;
     # decisión de negocio: no se le envía. El algoritmo la consulta vía
     # `algorithm._bloqueadas` (aplica en Fases 1-4 y nivel 1 de Fase 5); solo el
     # nivel 2 de Fase 5 puede forzarles cajas, con alerta. Se conservan las dos
