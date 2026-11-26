@@ -42,7 +42,7 @@ escribe a disco. `loader.load_files` (archivos maestros sueltos) solo se conserv
 - `inventario_efectivo = existencias + tránsito` de Celes (no «(=) Inventario Total», que viene
   inflado). `dias_proyectados = inventario_efectivo / consumo_diario`. Todo en **cajas enteras**.
 - Prioridad por grupo espejo: AGOTADA (< `MIN_STOCK_AGOTADO` = 0.3 cajas) → SAFETY (< 0.7) →
-  REPOSICIÓN (< `TARGET_DAYS` = 5 días) → CUBIERTA. La Fase 1 ordena solo por consumo (mayor
+  REPOSICIÓN (< `TARGET_DAYS` = 3 días) → CUBIERTA. La Fase 1 ordena solo por consumo (mayor
   primero); los niveles AGOTADA/SAFETY los usa la Fase 2.
 - **Excluidas del reparto normal**: `bloqueado_por_max` (existencias + tránsito ≥ `MAX` de
   Tiendas×Ítem; `MAX = 0` = sin tope) y `sin_match_celes` (sin fila en Celes). Solo la Fase 5 nivel 2
@@ -53,7 +53,7 @@ escribe a disco. `loader.load_files` (archivos maestros sueltos) solo se conserv
 | 1 | Completar `TARGET_DAYS`, por venta: de mayor a menor consumo, en rondas (todas reciben su 1.ª caja antes que alguien la 2.ª), máximo `MIN_CAJAS_INICIAL` = 2 cajas por tienda |
 | 2 | Garantizar el agotado: con lo que sobre, 1 caja a cada tienda que salió de F1 con 0 cajas: primero todas las AGOTADAS, luego las de SAFETY (mayor consumo primero) |
 | 3 | Renovación por vida útil: 1 caja (`CAJAS_RENOVACION`) si el último ingreso es más viejo que `VIDA UTIL EXHIBICION` y aún hay inventario; no si hay tránsito, ya recibió en F1/F2 o un SKU espejo tiene ingreso fresco |
-| 4 | Excedente: 1 caja por tienda por ronda, peso `consumo / días_actuales`, sin pasar `TOPE_EXCEDENTE` = 8 días ni `MAX_CAJAS_POR_ITEM` = 3 |
+| 4 | Excedente: 1 caja por tienda por ronda, peso `consumo / días_actuales`, sin pasar `TOPE_EXCEDENTE` = 7 días ni `MAX_CAJAS_POR_ITEM` = 3 |
 | 5 | Cero residuo: lo que quede se reparte igual (única fase que supera el tope). Mucho volumen aquí = sobre-compra |
 
 Grupos espejo (hoja Espejo): la necesidad de F1 y la elegibilidad/peso de F4 se calculan con el
@@ -89,7 +89,7 @@ sin coincidencia = DESCONTINUADO / MAX 0), así que funciona aunque Excel no hay
 
 - **MAX**: se compara contra existencias + tránsito; el corte es `>= MAX`, sin redondear. Funciona como
   interruptor (si no está bloqueada, la limita `MAX_CAJAS_POR_ITEM`) y aplica por SKU, no por grupo espejo.
-- **Orden Fase 1 / Fase 2** (24-nov-2026): primero las que más venden (F1, completar 5 días) y luego
+- **Orden Fase 1 / Fase 2** (24-nov-2026): primero las que más venden (F1, completar `TARGET_DAYS` días) y luego
   agotado → seguridad (F2, solo con el sobrante). Aceptado que, con stock escaso, tiendas pequeñas
   agotadas o en seguridad queden sin caja (simulación del 23-nov: 69 agotadas sin caja vs 16 antes).
 - **Sin datos en Celes**: no se le envía (llegaría como AGOTADA por falta del dato) y no se compra
@@ -111,7 +111,13 @@ sin coincidencia = DESCONTINUADO / MAX 0), así que funciona aunque Excel no hay
   atrasadas hasta 3 días. No cuentan las cerradas, las de otra bodega, los ítems inactivos ni las
   vencidas. «Recibida según Stock» = el Stock tiene `Fecha última entrada` posterior a la entrega,
   porque Siesa no cierra la línea al recibir.
+- **Parámetros de distribución** (26-nov-2026): `TARGET_DAYS` = 3 días (antes 5) y `TOPE_EXCEDENTE` = 7
+  días (antes 8).
+- «Resumen Ítems» muestra F1 a F5 (con `F5 Cero residuo`, sin %), así la fila suma «Total Cajas».
+- Columna «Portafolio» (CLUSTERIZACIÓN del Portafolio: BASICO / EXTENDIDO / NEVERA F), solo informativa:
+  sale en Distribución, Resumen Ítems, Novedades y hojas por tienda, y en la compra (antes «Cluster»).
 - Σ compra por tienda = compra general del ítem, siempre. No se escribe ningún log en `Output/`.
+- Si un Excel de salida está abierto, `run.py` avisa y termina con código 1 (sin traceback).
 - Una corrida asume que `Input/` no cambia mientras corre: si se editan los Excel en paralelo, el
   resultado cambia.
 

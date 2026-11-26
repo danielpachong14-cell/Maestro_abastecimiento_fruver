@@ -13,10 +13,10 @@ import pandas as pd
 # >>> PARÁMETROS EDITABLES (cambia solo el número; todo el código y los tests
 # >>> leen estas constantes, no hay valores duplicados en otro lado)
 # =============================================================================
-TOPE_EXCEDENTE = 8          # <<< TOPE DE DÍAS: máximo de días de inventario que una tienda puede
+TOPE_EXCEDENTE = 7          # <<< TOPE DE DÍAS: máximo de días de inventario que una tienda puede
                             #     acumular al recibir el SOBRANTE del CEDI (Fases 4/5). Ninguna tienda
                             #     recibe una caja que la deje por encima de este valor.
-TARGET_DAYS = 5.0           # días objetivo de inventario proyectado por tienda (Fase 1)
+TARGET_DAYS = 3.0           # días objetivo de inventario proyectado por tienda (Fase 1)
 MAX_CAJAS_POR_ITEM = 3      # tope duro: máximo que una tienda recibe por ítem (todas las fases)
 MIN_CAJAS_INICIAL = 2       # máximo de cajas por tienda en Fase 1 (completar TARGET_DAYS, por rondas)
 MIN_STOCK_AGOTADO = 0.3     # por debajo de este STOCK (cajas) = AGOTADA

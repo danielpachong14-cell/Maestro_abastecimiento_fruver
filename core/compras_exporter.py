@@ -38,7 +38,7 @@ def _hoja_general(res):
     return pd.DataFrame({
         'Código Ítem': it['item_code'].astype(int),
         'Nombre Ítem': it['item_desc'],
-        'Cluster': it['cluster'],
+        'Portafolio': it['cluster'],
         'UM': it['um'],
         'Día de Compra': it['dia_compra'] if 'dia_compra' in it else '',
         'Se Compra Hoy': np.where(it['se_compra_hoy'].fillna(True).astype(bool), 'Sí', 'No')
@@ -98,7 +98,7 @@ def _hoja_costo_exhibicion(res):
     d = d.sort_values(['merma_cop', 'merma_sem'], ascending=False, na_position='last')
     return pd.DataFrame({
         'Tienda': d['store_code'], 'Nombre Tienda': d['store_name'],
-        'Código Ítem': d['item_code'].astype(int), 'Nombre Ítem': d['item_desc'], 'Cluster': d['cluster'],
+        'Código Ítem': d['item_code'].astype(int), 'Nombre Ítem': d['item_desc'], 'Portafolio': d['cluster'],
         'MIN Exhibición': _r(d['min_exhibicion']), 'Consumo Diario': _r(d['consumo_ajustado'], 3),
         'Vida Útil': d['vida_util'], 'Venta en Vida Útil': _r(d['venta_vu']),
         'Días para Vender MIN': _r(np.where(d['consumo_ajustado'] > 0,
@@ -127,7 +127,7 @@ def _hoja_sin_pronostico(res):
     filas = []
     for _, r in it[~en_celes_mask].sort_values('item_code').iterrows():
         filas.append({'Tipo': 'Ítem sin datos en Celes', 'Código Ítem': int(r['item_code']),
-                      'Nombre Ítem': r['item_desc'], 'Cluster': r['cluster'], 'Tienda': '',
+                      'Nombre Ítem': r['item_desc'], 'Portafolio': r['cluster'], 'Tienda': '',
                       'Nombre Tienda': f'{int(r["n_tiendas"])} tienda(s) con portafolio activo',
                       'Detalle': 'Sin consumo ni inventario en Celes: compra manual. La referencia es el MIN de '
                                  'exhibición de todas sus tiendas (compra de lanzamiento).',
@@ -136,11 +136,11 @@ def _hoja_sin_pronostico(res):
     d = res.df_tienda[res.df_tienda['sin_match_celes'] & res.df_tienda['item_code'].isin(en_celes)]
     for _, r in d.sort_values(['item_code', 'store_code']).iterrows():
         filas.append({'Tipo': 'Tienda×ítem sin fila en Celes', 'Código Ítem': int(r['item_code']),
-                      'Nombre Ítem': r['item_desc'], 'Cluster': r['cluster'], 'Tienda': r['store_code'],
+                      'Nombre Ítem': r['item_desc'], 'Portafolio': r['cluster'], 'Tienda': r['store_code'],
                       'Nombre Tienda': r['store_name'],
                       'Detalle': 'Portafolio activo pero Celes no trae consumo ni inventario: no se le compra.',
                       'Compra Referencia (Σ MIN)': round(float(r['min_exhibicion']), 1)})
-    cols = ['Tipo', 'Código Ítem', 'Nombre Ítem', 'Cluster', 'Tienda', 'Nombre Tienda', 'Detalle',
+    cols = ['Tipo', 'Código Ítem', 'Nombre Ítem', 'Portafolio', 'Tienda', 'Nombre Tienda', 'Detalle',
             'Compra Referencia (Σ MIN)']
     return pd.DataFrame(filas, columns=cols)
 

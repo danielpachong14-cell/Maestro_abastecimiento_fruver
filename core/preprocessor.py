@@ -408,6 +408,12 @@ def build_distribution_df(dfs):
     _vu_to = _vu_to_crudo.fillna(_vu_ex + _vu_ce)
 
     _items = portafolio['item_key']
+    # Portafolio al que pertenece el ítem (CLUSTERIZACIÓN: BASICO / EXTENDIDO / NEVERA F); solo informativo.
+    if 'CLUSTERIZACIÓN' in portafolio.columns:
+        _cl = portafolio.drop_duplicates('item_key').set_index('item_key')['CLUSTERIZACIÓN']
+        merged['portafolio'] = merged['item_code'].map(_cl.fillna('').astype(str).str.strip()).fillna('')
+    else:
+        merged['portafolio'] = ''
     _vu_map = dict(zip(_items[_vu_ex > 0], _vu_ex[_vu_ex > 0]))
     _ce_map = dict(zip(_items[_vu_ce >= 0], _vu_ce[_vu_ce >= 0]))
     _to_map = dict(zip(_items[_vu_to >= 0], _vu_to[_vu_to >= 0]))
@@ -538,7 +544,7 @@ def build_distribution_df(dfs):
         })
 
     cols_out = [
-        'item_code', 'item_desc', 'store_code', 'store_name', 'zona',
+        'item_code', 'item_desc', 'portafolio', 'store_code', 'store_name', 'zona',
         'consumo_diario', 'dias_inventario_actuales', 'inventario_tienda',
         'inventario_transito', 'inventario_total', 'inventario_efectivo', 'dias_proyectados',
         'cajas_disponibles_cedi', 'um', 'vida_util',

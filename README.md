@@ -42,5 +42,6 @@ Reemplazar cada día con el **mismo nombre**, con los Excel cerrados:
 
 Si la terminal muestra `Existencia CEDI    : 0 OK`, todo el stock quedó repartido.
 Si la compra falla, la distribución igual queda guardada.
+Cerrar los Excel de `Output/` antes de correr: si están abiertos, no se pueden sobrescribir.
 
 Detalle técnico (reglas, fases, parámetros): [CLAUDE.md](CLAUDE.md).

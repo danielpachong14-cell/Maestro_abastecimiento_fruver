@@ -30,7 +30,7 @@ _NIVEL_ALERTA = {'CRÍTICO': 'Crítico', 'ERROR': 'Crítico', 'ADVERTENCIA': 'Ad
 
 _ORDEN_TIPO_ALERTA = {'CRÍTICO': 0, 'ERROR': 0, 'ADVERTENCIA': 1}
 
-_COL_TIENDA = ['Tienda', 'Nombre Tienda', 'Código Ítem', 'Nombre Ítem']
+_COL_TIENDA = ['Tienda', 'Nombre Tienda', 'Código Ítem', 'Nombre Ítem', 'Portafolio']
 
 
 def _style_header(ws, row=1):
@@ -63,6 +63,13 @@ def _cajas_forzadas_por_combo(df_output):
     }
 
 
+def _portafolio(df):
+    """Portafolio del ítem (CLUSTERIZACIÓN de Portafolio Fruver); vacío si el DataFrame no lo trae."""
+    if 'portafolio' in df.columns:
+        return df['portafolio'].fillna('').astype(str)
+    return pd.Series('', index=df.index)
+
+
 def _base_tienda_item(df, forzadas=None):
     """Columnas comunes Tienda/Ítem de las hojas de apoyo (+ cajas forzadas si se pide)."""
     out = pd.DataFrame({
@@ -70,6 +77,7 @@ def _base_tienda_item(df, forzadas=None):
         'Nombre Tienda': df['store_name'],
         'Código Ítem':   df['item_code'],
         'Nombre Ítem':   df['item_desc'],
+        'Portafolio':    _portafolio(df),
     })
     if forzadas is not None:
         out['_forzadas'] = [forzadas.get((str(s), i), 0) for s, i in zip(df['store_code'], df['item_code'])]
@@ -278,15 +286,16 @@ def _build_alertas_sheet(alertas):
 
 
 def _resumen_items(d):
-    cols = ['Código Ítem', 'Nombre Ítem', 'Total Cajas', f'F1 Cobertura {TARGET_DAYS:g}d', 'F2 Agotadas',
-            'F3 Renovación', 'F4 Excedente']
+    cols = ['Código Ítem', 'Nombre Ítem', 'Portafolio', 'Total Cajas', f'F1 Cobertura {TARGET_DAYS:g}d', 'F2 Agotadas',
+            'F3 Renovación', 'F4 Excedente', 'F5 Cero residuo']
     if d is None:
         return pd.DataFrame(columns=cols)
     r = (
-        d.groupby('item_code', as_index=False)
-        .agg(nombre=('item_desc', 'first'), total=('cajas_asignadas', 'sum'),
+        d.assign(portafolio=_portafolio(d))
+        .groupby('item_code', as_index=False)
+        .agg(nombre=('item_desc', 'first'), portafolio=('portafolio', 'first'), total=('cajas_asignadas', 'sum'),
              f1=('cajas_fase1', 'sum'), f2=('cajas_fase2', 'sum'), f3=('cajas_fase3', 'sum'),
-             f4=('cajas_fase4', 'sum'))
+             f4=('cajas_fase4', 'sum'), f5=('cajas_fase5', 'sum'))
         .sort_values('item_code')
     )
     r.columns = cols
@@ -304,7 +313,7 @@ def generate_excel(df_output, alertas=None, df_merged=None):
 
     if has_data:
         d = df_output.copy()
-        for col in ('cajas_fase1', 'cajas_fase2', 'cajas_fase3', 'cajas_fase4'):
+        for col in ('cajas_fase1', 'cajas_fase2', 'cajas_fase3', 'cajas_fase4', 'cajas_fase5'):
             if col not in d.columns:
                 d[col] = 0
         d['_stock_despues'] = d['inventario_efectivo'] + d['cajas_asignadas']
@@ -320,7 +329,7 @@ def generate_excel(df_output, alertas=None, df_merged=None):
     if not has_data:
         dist_df = pd.DataFrame(columns=[
             'Centro Operacional de la Bodega', 'Nombre Tienda', 'Zona',
-            'Código de Producto', 'Nombre Ítem', 'UM',
+            'Código de Producto', 'Nombre Ítem', 'Portafolio', 'UM',
             'Consumo Diario', 'Stock Antes Pedido', 'Días Inventario Actual',
             'Pedido Final', 'Stock Después Pedido', 'Días Inventario Proyectado',
         ])
@@ -331,6 +340,7 @@ def generate_excel(df_output, alertas=None, df_merged=None):
             'Zona':                            d['zona'],
             'Código de Producto':              d['item_code'],
             'Nombre Ítem':                     d['item_desc'],
+            'Portafolio':                      _portafolio(d),
             'UM':                              d['um'],
             'Consumo Diario':                  d['consumo_diario'].round(2),
             'Stock Antes Pedido':              d['inventario_efectivo'].round(2),
@@ -373,7 +383,7 @@ def generate_excel(df_output, alertas=None, df_merged=None):
         ws_ri = writer.sheets['Resumen Ítems']
         ws_ri.cell(row=1, column=1, value=(
             f'F1 Cobertura a {TARGET_DAYS:g} días (por venta) · F2 Agotadas / seguridad · F3 Renovación por vida útil · '
-            'F4 Excedente voluntario.'
+            'F4 Excedente voluntario · F5 Cero residuo (sobrante que supera el tope de días).'
         ))
 
         for ws in writer.book.worksheets:
@@ -391,7 +401,7 @@ def generate_excel(df_output, alertas=None, df_merged=None):
             for fila in range(2, ws.max_row + 1):
                 celda = ws.cell(row=fila, column=1)
                 celda.fill = _FILL_SITUACION.get(celda.value, celda.fill)
-            ws.column_dimensions['F'].width = 70   # Detalle
+            ws.column_dimensions['G'].width = 70   # Detalle
             ws.column_dimensions['A'].width = 22
         ws = writer.sheets['Alertas']
         ws.column_dimensions['A'].width = 14

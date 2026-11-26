@@ -91,10 +91,20 @@ def main():
 
     OUTPUT.mkdir(exist_ok=True)
     filename = OUTPUT / f"distribucion_fruver_{date.today().strftime('%Y%m%d')}.xlsx"
-    filename.write_bytes(generate_excel(df_output, alertas, df_merged))
+    _guardar(filename, generate_excel(df_output, alertas, df_merged))
     log.info(f"Archivo generado: {filename}")
 
     _generar_compra(dfs, df_output, extra, alertas_maestros)
+
+
+def _guardar(filename, contenido, nota=""):
+    """Escribe el Excel; si está abierto (p. ej. en Excel) muestra un mensaje claro y termina."""
+    try:
+        filename.write_bytes(contenido)
+    except PermissionError:
+        log.error(f"No se pudo guardar {filename.name}: el archivo está abierto (¿en Excel?). "
+                  f"Ciérralo y vuelve a correr.{' ' + nota if nota else ''}")
+        sys.exit(1)
 
 
 def _generar_compra(dfs, df_output, extra, alertas_maestros):
@@ -119,7 +129,7 @@ def _generar_compra(dfs, df_output, extra, alertas_maestros):
         for a in res.alertas:
             log.info(f"  [{a['tipo']}] {a['mensaje']}")
     filename = OUTPUT / f"compra_fruver_{date.today().strftime('%Y%m%d')}.xlsx"
-    filename.write_bytes(contenido)
+    _guardar(filename, contenido, nota="La distribución sí quedó guardada.")
     log.info(f"Archivo generado: {filename}")
 
 

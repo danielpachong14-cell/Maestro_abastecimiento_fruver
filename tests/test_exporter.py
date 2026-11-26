@@ -83,7 +83,7 @@ def test_hoja_distribucion_columnas_y_totales():
 
     columnas_esperadas = [
         'Centro Operacional de la Bodega', 'Nombre Tienda', 'Zona',
-        'Código de Producto', 'Nombre Ítem', 'UM', 'Consumo Diario',
+        'Código de Producto', 'Nombre Ítem', 'Portafolio', 'UM', 'Consumo Diario',
         'Stock Antes Pedido', 'Días Inventario Actual', 'Pedido Final',
         'Stock Después Pedido', 'Días Inventario Proyectado',
     ]
@@ -252,7 +252,7 @@ def test_novedades_existe_vacia_con_encabezado_si_no_hay_casos():
     hoja = _novedades(generate_excel(pd.DataFrame([normal]), alertas=[], df_merged=df_merged))
     assert len(hoja) == 0
     assert list(hoja.columns) == ['Situación', 'Tienda', 'Nombre Tienda', 'Código Ítem',
-                                  'Nombre Ítem', 'Detalle', 'Cajas Enviadas']
+                                  'Nombre Ítem', 'Portafolio', 'Detalle', 'Cajas Enviadas']
 
 
 def test_novedades_tolera_df_merged_sin_columnas_nuevas():
@@ -351,18 +351,21 @@ def test_hoja_alertas_solo_trae_nivel_item_y_que_paso():
     assert list(hoja.columns) == ['Nivel', 'Ítem', 'Qué pasó']
 
 
-def test_resumen_items_lleva_leyenda_de_una_linea_y_sin_columnas_de_sobreenvio():
+def test_resumen_items_lleva_leyenda_de_una_linea_y_columna_f5_sin_porcentaje():
     r = _row(1, 'Producto A', 'S01', consumo=1.0, existencias=0.0, cajas_asignadas=4, cajas_cedi=4)
     r['cajas_fase4'], r['cajas_fase5'] = 1, 3
     excel = generate_excel(pd.DataFrame([r]), alertas=[])
     crudo = pd.read_excel(io.BytesIO(excel), sheet_name='Resumen Ítems', header=None)
     assert 'F4 Excedente voluntario' in crudo.iloc[0, 0] and crudo.iloc[1].isna().all()
-    assert 'F5' not in crudo.iloc[0, 0] and 'sobre-compra' not in crudo.iloc[0, 0]
+    assert 'F5 Cero residuo' in crudo.iloc[0, 0]
     ri = pd.read_excel(io.BytesIO(excel), sheet_name='Resumen Ítems', header=2)
-    assert not any('Forzado' in c for c in ri.columns)
+    assert not any('Forzado' in c or '%' in c for c in ri.columns)
+    # La fila cuadra: Total = F1 + … + F5.
+    fases = [c for c in ri.columns if c[:2] in ('F1', 'F2', 'F3', 'F4', 'F5')]
+    assert ri.loc[0, 'F5 Cero residuo'] == 3 and ri.loc[0, fases].sum() == ri.loc[0, 'Total Cajas'] == 4
     from core.algorithm import TARGET_DAYS
-    assert list(ri.columns) == ['Código Ítem', 'Nombre Ítem', 'Total Cajas', f'F1 Cobertura {TARGET_DAYS:g}d',
-                                'F2 Agotadas', 'F3 Renovación', 'F4 Excedente']
+    assert list(ri.columns) == ['Código Ítem', 'Nombre Ítem', 'Portafolio', 'Total Cajas', f'F1 Cobertura {TARGET_DAYS:g}d',
+                                'F2 Agotadas', 'F3 Renovación', 'F4 Excedente', 'F5 Cero residuo']
 
 
 def test_hojas_de_analisis_tienen_encabezado_fijo_y_filtros():
@@ -410,3 +413,14 @@ def test_resumen_renovacion_sin_candidatas_es_vacio():
     r = _fila_renovacion(1, 'S01', 0.3, 1.5, dias=2, vu=5)
     df = pd.DataFrame([r])
     assert resumen_renovacion(df, df) == {} and resumen_renovacion_texto(df, df) == ''
+
+
+def test_portafolio_del_item_sale_en_distribucion_resumen_y_novedades():
+    """La columna «Portafolio» (CLUSTERIZACIÓN del ítem) aparece en Distribución, Resumen Ítems y Novedades."""
+    r = _row(1, 'Producto A', 'S01', consumo=1.0, existencias=0.0, cajas_asignadas=2, cajas_cedi=2)
+    r['portafolio'] = 'NEVERA F'
+    excel = generate_excel(pd.DataFrame([r]), alertas=[])
+    dist = pd.read_excel(io.BytesIO(excel), sheet_name='Distribución')
+    ri = pd.read_excel(io.BytesIO(excel), sheet_name='Resumen Ítems', header=2)
+    assert dist.loc[0, 'Portafolio'] == 'NEVERA F'
+    assert ri.loc[0, 'Portafolio'] == 'NEVERA F'

@@ -1272,9 +1272,11 @@ def test_fase1_escasez_prioriza_mayor_venta_y_reparte_por_rondas():
     """Con 3 cajas y tres tiendas que necesitan 2 cada una, la ronda 1 da 1 caja
     a cada una (de mayor a menor venta) antes de que alguna reciba la 2.ª; con 2
     cajas, se quedan las dos que más venden."""
-    filas = [_store('BAJA', 0.5, 1.0, existencias=0.5),     # necesita 2.5 - 0.5 = 2
-             _store('ALTA', 2.0, 4.0, existencias=8.5),   # necesita 10 - 8.5 = 1.5 → 2
-             _store('MEDIA', 1.0, 3.0, existencias=3.5)]  # necesita 5 - 3.5 = 1.5 → 2
+    from core.algorithm import TARGET_DAYS as T
+    # Existencias relativas a TARGET_DAYS: cada tienda necesita 2 cajas para llegar al objetivo.
+    filas = [_store('BAJA', 0.5, 1.0, existencias=max(0.0, 0.5 * T - 2)),   # 0.5·T - exist = 2
+             _store('ALTA', 2.0, 4.0, existencias=2.0 * T - 1.5),           # 2·T - exist = 1.5 → 2
+             _store('MEDIA', 1.0, 3.0, existencias=1.0 * T - 1.5)]          # 1·T - exist = 1.5 → 2
     t, _, _ = distribuir_item('X', 3, _df(filas, cajas=3))
     assert _por_tienda(t)['cajas_fase1'].to_dict() == {'ALTA': 1, 'MEDIA': 1, 'BAJA': 1}
 
@@ -1292,8 +1294,11 @@ def test_fase1_no_pasa_de_min_cajas_iniciales():
 def test_fase1_va_antes_que_la_agotada():
     """Con 1 sola caja, va a la tienda que más vende aunque la otra esté AGOTADA
     y venda menos: la Fase 1 manda por venta, la Fase 2 solo usa el sobrante."""
+    from core.algorithm import TARGET_DAYS as T
+    # GRANDE queda 1 caja por debajo de TARGET_DAYS, así necesita Fase 1 sea cual sea T.
+    ex = 2.0 * T - 1.0
     filas = [_store('AGOT', 0.2, 0.0, existencias=0.0),
-             _store('GRANDE', 2.0, 3.0, existencias=6.0)]
+             _store('GRANDE', 2.0, ex / 2.0, existencias=ex)]
     t, _, _ = distribuir_item('X', 1, _df(filas, cajas=1))
     por = _por_tienda(t)
     assert int(por.loc['GRANDE', 'cajas_fase1']) == 1
