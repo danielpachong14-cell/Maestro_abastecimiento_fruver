@@ -294,7 +294,7 @@ def _fila_renovacion(item, store, consumo, existencias, dias, vu, fase3=0, trans
     r['grupo_id'] = f'ITEM_{item}'
     r['vida_util_portafolio'] = vu
     r['dias_desde_ingreso'] = dias
-    r['fecha_ultimo_ingreso'] = pd.Timestamp('2026-11-12') - pd.Timedelta(days=dias)
+    r['fecha_ultimo_ingreso'] = pd.Timestamp('2026-11-12') - pd.Timedelta(dias, unit='D')
     r['venta_esperada_vida_util'] = consumo * vu
     r['grupo_con_ingreso_fresco'] = fresco
     r['excluida_del_reparto'] = False

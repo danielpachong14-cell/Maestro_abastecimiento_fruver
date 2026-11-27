@@ -32,7 +32,8 @@ escribe a disco. `loader.load_files` (archivos maestros sueltos) solo se conserv
 3. **Stock** trae una fila «Gran total» (o con "total") que se elimina; ítems repetidos se suman,
    fracciones se redondean hacia abajo (con alerta).
 4. **Estado activo** (`'NNN - ESTADO'`): se compara el último segmento **exacto**, nunca con
-   `contains` (`'INACTIVO'` contiene `'ACTIVO'`). Filtra Portafolio y Tiendas×Ítem; en Stock
+   `contains` (`'INACTIVO'` contiene `'ACTIVO'`); cualquier otro valor, aunque sea un error de
+   tipeo (`'INCATIVO'`), cuenta como no activo. Filtra Portafolio y Tiendas×Ítem; en Stock
    `ESTADO DEL PRODUCTO` **no** bloquea (solo alerta): si hay existencia física, se distribuye.
 5. La elegibilidad sale **solo** de Tiendas×Ítem (`ESTADO = ACTIVO`); Celes «Aplica para
    Distribución Automática?» se ignora. Tiendas es inner: tienda que no está, no recibe.
@@ -119,9 +120,11 @@ sin coincidencia = DESCONTINUADO / MAX 0), así que funciona aunque Excel no hay
   2,92 × 36 → 105 → 2,916667). Las de Celes quedan de referencia (`inventario_tienda_celes`).
 - **Tránsito ya recibido** (27-nov-2026): Celes es una foto anterior a Siesa (26 contra 27-nov). Si Siesa tiene
   un ingreso posterior a «Última Fecha de Ingreso» de Celes, se descuenta del tránsito lo que subieron las
-  existencias (tope: el tránsito); si no, el tránsito queda completo. Corrida del 27-nov: 295 dobles conteos
+  existencias (tope: el tránsito); si no, el tránsito queda completo. Validación del 27-nov: 295 dobles conteos
   eliminados y 0 restantes; el efectivo coincide con el total de Celes en 2.876 de 2.927 pares (el resto
   son ventas o ingresos entre las dos fotos, y vale Siesa). Alertas: tránsito recibido y diferencias > 0,5.
+  Corrida final del 27-nov (10 tiendas en «No generar pedido», antes 16): alerta de 310 pares / 353 cajas de
+  tránsito ya recibido, 35 diferencias > 0,5; 1.056 cajas repartidas (CEDI en 0) y compra de 1.515 cajas.
 - **Parámetros de distribución** (26-nov-2026): `TARGET_DAYS` = 3 días (antes 5) y `TOPE_EXCEDENTE` = 7
   días (antes 8).
 - «Resumen Ítems» muestra F1 a F5 (con `F5 Cero residuo`, sin %), así la fila suma «Total Cajas».

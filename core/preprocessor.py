@@ -596,7 +596,7 @@ def build_distribution_df(dfs):
                 'mensaje': 'Inventario Tiendas no trae ninguna fecha de último ingreso válida: '
                            'la Fase 3 (renovación por vida útil) no se puede aplicar.',
             })
-        elif _fecha_corte < pd.Timestamp.today().normalize() - pd.Timedelta(days=1):
+        elif _fecha_corte < pd.Timestamp.today().normalize() - pd.Timedelta(1, unit='D'):
             alertas.append({
                 'tipo': 'ADVERTENCIA', 'item': '-',
                 'mensaje': f'Inventario Tiendas parece desactualizado: su ingreso más reciente es '
