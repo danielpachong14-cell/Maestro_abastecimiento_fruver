@@ -45,7 +45,7 @@ def _archivos_validos(**overrides):
         }),
         'espejo': _excel_bytes({'grupo_id': ['G1'], 'item_id': [155]}),
         'inventario_tiendas': _excel_bytes({
-            'Item': [155], 'C.O. bodega': ['S03'],
+            'Item': [155], 'C.O. bodega': ['S03'], 'Cant. disponible': [1.0],
             'Fecha última entrada': ['2026-11-10'],
         }, sheet_name='Inv Tiendas'),
     }

@@ -113,11 +113,11 @@ def _hoja_bajas(res):
     return pd.DataFrame({
         'Tienda': d['store_code'], 'Nombre Tienda': d['store_name'],
         'Código Ítem': d['item_code'].astype(int), 'Nombre Ítem': d['item_desc'],
-        'Existencias Celes': _r(d['existencias_celes']),
+        'Existencias': _r(d['existencias_tienda']),
         'Último Ingreso': pd.to_datetime(d['fecha_ultimo_ingreso']).dt.date,
         'Días desde Ingreso': d['dias_desde_ingreso'], 'Vida Útil': d['vida_util'],
         'Consumo Diario': _r(d['consumo_diario'], 3),
-        'Valor (COP)': _r(d['existencias_celes'] * d['costo'], 0),
+        'Valor (COP)': _r(d['existencias_tienda'] * d['costo'], 0),
     })
 
 

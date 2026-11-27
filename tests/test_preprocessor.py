@@ -508,6 +508,7 @@ def _dfs_renovacion(fechas, vida_util=5, **overrides):
     base['inventario_tiendas'] = pd.DataFrame({
         'Item': [f[1] for f in fechas],
         'C.O. bodega': [f[0] for f in fechas],
+        'Cant. disponible': [2.0] * len(fechas),
         'Fecha última entrada': [pd.Timestamp(f[2]) if f[2] else pd.NaT for f in fechas],
     })
     base.update(overrides)
@@ -576,7 +577,7 @@ def test_renovacion_marca_ingreso_fresco_si_un_sku_espejo_entro_recientemente():
     })
     dfs['espejo'] = pd.DataFrame({'grupo_id': ['G', 'G'], 'item_id': [155, 156]})
     dfs['inventario_tiendas'] = pd.DataFrame({
-        'Item': [155, 156], 'C.O. bodega': ['S01', 'S01'],
+        'Item': [155, 156], 'C.O. bodega': ['S01', 'S01'], 'Cant. disponible': [2.0, 2.0],
         'Fecha última entrada': [pd.Timestamp('2026-11-01'), pd.Timestamp('2026-11-11')],
     })
     df_merged, _ = build_distribution_df(dfs)
@@ -647,3 +648,121 @@ def test_limite_de_la_regla_de_extremo_a_extremo_vida_util_5():
         out, _ = run_distribution(df_merged)
         resultados[ingreso] = (int(df_merged.iloc[0]['dias_desde_ingreso']), int(out['cajas_fase3'].sum()))
     assert resultados == {'2026-11-08': (4, 0), '2026-11-07': (5, 0), '2026-11-06': (6, 1)}, resultados
+
+
+# ── Existencias de tienda: Inventario Tiendas (Siesa); tránsito: Celes (27-nov-2026) ──────
+
+def _dfs_siesa(filas_siesa, existencias_celes=2.0, transito=1.0, max_valor=0):
+    """_dfs_base (S01 × 155, consumo 1, Celes con `existencias_celes`) + Inventario Tiendas con
+    `filas_siesa` = [(C.O. bodega, ítem, Cant. disponible)]."""
+    dfs = _dfs_base()
+    dfs['celes'] = dfs['celes'].assign(**{
+        'Inventario Disponible en esta Tienda (Unidades de Distibución)': [existencias_celes],
+        '(-) inventario de traslado en proceso': [transito],
+    })
+    dfs['tiendas_item'] = dfs['tiendas_item'].assign(MAX=[max_valor])
+    dfs['inventario_tiendas'] = pd.DataFrame({
+        'Item': [f[1] for f in filas_siesa], 'C.O. bodega': [f[0] for f in filas_siesa],
+        'Cant. disponible': [f[2] for f in filas_siesa],
+        'Fecha última entrada': [pd.Timestamp('2026-11-26')] * len(filas_siesa),
+    })
+    return dfs
+
+
+def test_existencias_salen_de_siesa_y_el_transito_de_celes():
+    df, alertas = build_distribution_df(_dfs_siesa([('S01', 155, 5.0)], existencias_celes=2.0, transito=1.0))
+    f = df.iloc[0]
+    assert f['inventario_tienda'] == pytest.approx(5.0)        # Siesa, no los 2 de Celes
+    assert f['inventario_tienda_celes'] == pytest.approx(2.0)  # Celes queda de referencia
+    assert f['inventario_transito'] == pytest.approx(1.0)      # Celes
+    assert f['inventario_efectivo'] == pytest.approx(6.0)
+    assert f['dias_proyectados'] == pytest.approx(6.0)         # consumo 1/día
+    assert any(a.get('combos_existencias_distintas') == 1 for a in alertas)
+
+
+def test_tope_max_usa_existencias_de_siesa_mas_transito_de_celes():
+    # Celes diría 2 + 1 = 3 < MAX 6; con Siesa 5 + 1 = 6 ≥ MAX 6 → bloqueada.
+    df, _ = build_distribution_df(_dfs_siesa([('S01', 155, 5.0)], max_valor=6))
+    assert bool(df.iloc[0]['bloqueado_por_max'])
+
+
+def test_sub_bodegas_de_siesa_se_suman():
+    df, _ = build_distribution_df(_dfs_siesa([('S01', 155, 1.5), ('S01', 155, 0.5)], existencias_celes=2.0))
+    assert df.iloc[0]['inventario_tienda'] == pytest.approx(2.0)
+
+
+def test_par_sin_fila_en_siesa_toma_cero_existencias_y_alerta():
+    df, alertas = build_distribution_df(_dfs_siesa([('S99', 999, 4.0)], existencias_celes=2.0))
+    assert df.iloc[0]['inventario_tienda'] == 0
+    assert any(a.get('combos_sin_inventario_siesa') == 1 for a in alertas)
+
+
+def test_sin_columna_cant_disponible_usa_celes_y_alerta():
+    dfs = _dfs_siesa([('S01', 155, 5.0)], existencias_celes=2.0)
+    dfs['inventario_tiendas'] = dfs['inventario_tiendas'].drop(columns='Cant. disponible')
+    df, alertas = build_distribution_df(dfs)
+    assert df.iloc[0]['inventario_tienda'] == pytest.approx(2.0)
+    assert any('Cant. disponible' in a['mensaje'] for a in alertas)
+
+
+# ── Exactitud: unidades enteras y tránsito que Siesa ya recibió ──────────────────────────
+
+from core.preprocessor import a_fecha_excel, cajas_exactas, transito_pendiente
+
+
+def test_cajas_exactas_deshace_el_redondeo_de_siesa():
+    # 105 unidades / 36 = 2,916667; Siesa lo trae como 2,92.
+    out = cajas_exactas(pd.Series([2.92, 1.33, 2.5, 3.0]), pd.Series([36, 3, 100, 0]))
+    assert out.tolist() == pytest.approx([105 / 36, 4 / 3, 2.5, 3.0])   # factor 0 queda igual
+
+
+def test_fecha_de_celes_como_numero_de_serie_de_excel():
+    assert a_fecha_excel(pd.Series([46352]))[0] == pd.Timestamp('2026-11-26')
+
+
+def _transito(ex_siesa, ex_celes, tr, f_siesa, f_celes):
+    pend, rec = transito_pendiente(pd.Series([ex_siesa], dtype=float), pd.Series([ex_celes], dtype=float),
+                                   pd.Series([tr], dtype=float), pd.Series([pd.Timestamp(f_siesa)]),
+                                   pd.Series([pd.Timestamp(f_celes)]))
+    return pend[0], rec[0]
+
+
+def test_transito_ya_recibido_en_siesa_no_se_cuenta_dos_veces():
+    # Celes (26-nov): 2,10 + 2 en tránsito. Siesa (ingreso 27-nov): 4,10 → el traslado ya entró.
+    assert _transito(4.10, 2.10, 2, '2026-11-27', '2026-11-26') == pytest.approx((0.0, 2.0))
+
+
+def test_transito_parcialmente_recibido():
+    assert _transito(3.10, 2.10, 2, '2026-11-27', '2026-11-26') == pytest.approx((1.0, 1.0))
+
+
+def test_sin_ingreso_posterior_en_siesa_el_transito_queda_completo():
+    # Siesa subió, pero su último ingreso no es posterior al de Celes: no es el traslado.
+    assert _transito(3.0, 2.0, 1, '2026-11-26', '2026-11-26') == pytest.approx((1.0, 0.0))
+
+
+def test_ingreso_nuevo_sin_cambio_de_existencias_conserva_el_transito():
+    assert _transito(2.0, 2.0, 1, '2026-11-27', '2026-11-26') == pytest.approx((1.0, 0.0))
+
+
+def test_existencias_efectivas_exactas_caso_s07_aguacate():
+    """S07 × 1561: Celes 2,916667 + tránsito 1 (último ingreso 26-nov); Siesa 2,92 (CN36), ingreso 26-nov."""
+    dfs = _dfs_siesa([('S01', 155, 2.92)], existencias_celes=105 / 36, transito=1.0)
+    dfs['celes']['Última Fecha de Ingreso'] = 46352
+    dfs['inventario_tiendas']['Factor U.M.'] = 36
+    f = build_distribution_df(dfs)[0].iloc[0]
+    assert f['inventario_tienda'] == pytest.approx(105 / 36, abs=1e-12)
+    assert f['inventario_transito'] == 1.0
+    assert f['inventario_efectivo'] == pytest.approx(105 / 36 + 1, abs=1e-12)
+
+
+def test_traslado_recibido_se_descuenta_en_el_merge_y_alerta():
+    dfs = _dfs_siesa([('S01', 155, 4.10)], existencias_celes=2.10, transito=2.0)
+    dfs['celes']['Última Fecha de Ingreso'] = 46352                        # 26-nov
+    dfs['inventario_tiendas']['Fecha última entrada'] = pd.Timestamp('2026-11-27')
+    df, alertas = build_distribution_df(dfs)
+    f = df.iloc[0]
+    assert (f['inventario_tienda'], f['inventario_transito'], f['inventario_transito_celes']) == pytest.approx((4.1, 0.0, 2.0))
+    assert f['inventario_efectivo'] == pytest.approx(4.1)
+    assert any(a.get('combos_transito_recibido') == 1 for a in alertas)
+    assert not any('combos_existencias_distintas' in a for a in alertas)  # la diferencia la explica el traslado

@@ -28,7 +28,7 @@ Reemplazar cada día con el **mismo nombre**, con los Excel cerrados:
 |---|---|---|
 | `Stock.xlsx` | Cajas disponibles en el CEDI (Siesa) | Diario |
 | `Celes.xlsx` | Consumo e inventario por tienda × ítem | Diario |
-| `Inventario Tiendas.xlsx` | Último ingreso por tienda × ítem (Siesa) | Diario |
+| `Inventario Tiendas.xlsx` | Existencias (`Cant. disponible`) y último ingreso por tienda × ítem (Siesa) | Diario |
 | `Compras_Transito.xlsx` | OC abiertas de Siesa (opcional, evita comprar doble) | Diario |
 | `Maestros Fruver.xlsx` | Portafolio, STATUS, Tiendas, Tiendas x Item (MIN/MAX), BD_MAX, Espejo, No generar pedido, Parametros, Dias de compra, Calendario | Cuando cambie |
 

@@ -12,7 +12,6 @@ REQUIRED_COLUMNS = {
     'celes': ['Código de Bodega', 'Nombre de Bodega', 'Código de Producto',
               'Consumo Diario (Unidades de Distribución)',
               '(=) Días de Inventario Actuales',
-              'Inventario Disponible en esta Tienda (Unidades de Distibución)',
               '(-) inventario de traslado en proceso',
               '(=) Inventario Total',
               'UM'],
@@ -21,9 +20,9 @@ REQUIRED_COLUMNS = {
     'tiendas_item': ['COD SIESA', 'TIPO DE PORTAFOLIO', 'ITEM', 'ESTADO', 'MAX'],
     'espejo': ['grupo_id', 'item_id'],
     'excluidas': ['Centro Operacional de la Bodega'],
-    # Extracto de Siesa (hoja «Inv Tiendas»): una fila por ítem × bodega. Se usa
-    # SOLO para la fecha de último ingreso (Fase 3, renovación por vida útil).
-    'inventario_tiendas': ['Item', 'C.O. bodega', 'Fecha última entrada'],
+    # Extracto de Siesa (hoja «Inv Tiendas»): una fila por ítem × bodega. Da las EXISTENCIAS
+    # de cada tienda (Cant. disponible, en cajas) y la fecha de último ingreso (Fase 3).
+    'inventario_tiendas': ['Item', 'C.O. bodega', 'Cant. disponible', 'Fecha última entrada'],
     # Módulo de compras (opcional): export de Siesa de órdenes de compra abiertas (hoja «OC en tránsito»).
     # Pendiente = Cant. ordenada − Cant. entrada; ver compras_preprocessor._clasificar_oc.
     'compras_transito': ['Item', 'Cant. ordenada', 'Fecha de Entrega'],

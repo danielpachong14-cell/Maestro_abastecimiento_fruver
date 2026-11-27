@@ -68,8 +68,10 @@ def armar_dfs(filas, items, excluidas=None):
         } for f in filas]),
         'espejo': pd.DataFrame(columns=['grupo_id', 'item_id']),
         'inventario_tiendas': pd.DataFrame([{
-            'Item': f['item'], 'C.O. bodega': f['store'], 'Fecha última entrada': f['ultimo_ingreso'],
-        } for f in filas] + [{'Item': 0, 'C.O. bodega': 'X', 'Fecha última entrada': str(JUEVES)}]),
+            'Item': f['item'], 'C.O. bodega': f['store'], 'Cant. disponible': f['existencias'],
+            'Fecha última entrada': f['ultimo_ingreso'],
+        } for f in filas] + [{'Item': 0, 'C.O. bodega': 'X', 'Cant. disponible': 0.0,
+                              'Fecha última entrada': str(JUEVES)}]),
     }
     if excluidas is not None:
         dfs['excluidas'] = pd.DataFrame({'Centro Operacional de la Bodega': excluidas})

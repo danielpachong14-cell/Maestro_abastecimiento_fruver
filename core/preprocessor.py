@@ -67,6 +67,90 @@ def _alertar_filas_descartadas(n_antes, n_despues, archivo_label, alertas):
         })
 
 
+# Factor U.M. hasta el que el redondeo de Siesa a 2 decimales se deshace sin ambigüedad:
+# el error es ≤ 0,005 caja = 0,005 × factor unidades, que debe quedar ≤ 0,5 unidad.
+FACTOR_MAX_UNIDADES_EXACTAS = 100
+
+
+def a_fecha_excel(serie):
+    """Fechas que llegan como fecha, texto o número de serie de Excel (46352 = 2026-11-26)."""
+    serie = pd.Series(serie)
+    if pd.api.types.is_datetime64_any_dtype(serie):
+        return serie
+    num = pd.to_numeric(serie, errors='coerce')
+    fechas = pd.to_datetime(num, unit='D', origin='1899-12-30', errors='coerce')
+    resto = num.isna() & serie.notna()
+    if resto.any():
+        fechas[resto] = pd.to_datetime(serie[resto].astype(str), errors='coerce')
+    return fechas
+
+
+def cajas_exactas(cajas, factor):
+    """Siesa entrega `Cant. disponible` en cajas con 2 decimales (105 unidades / 36 = 2,92). Las
+    existencias son unidades enteras, así que se recupera el valor exacto: round(cajas × factor) / factor
+    (2,92 → 105 → 2,916667). Con factor vacío, ≤ 0 o > FACTOR_MAX_UNIDADES_EXACTAS queda como viene."""
+    cajas = pd.to_numeric(cajas, errors='coerce')
+    factor = pd.to_numeric(factor, errors='coerce')
+    ok = (factor > 0) & (factor <= FACTOR_MAX_UNIDADES_EXACTAS) & cajas.notna()
+    exactas = (cajas * factor).round() / factor.where(ok)
+    return exactas.where(ok, cajas)
+
+
+def transito_pendiente(existencias_siesa, existencias_celes, transito_celes, fecha_siesa, fecha_celes):
+    """Parte del tránsito de Celes que todavía no entró a la tienda según Siesa.
+
+    Celes es una foto anterior a la de Siesa (p. ej. 26-nov contra 27-nov): un traslado que Celes muestra
+    «en proceso» puede ya estar sumado en `Cant. disponible` de Siesa, y contarlo en ambos lo duplica.
+    Se da por recibido cuando Siesa tiene un ingreso POSTERIOR al último que conoce Celes, y la cantidad
+    recibida es lo que subieron las existencias entre las dos fotos, con el tránsito como tope:
+        recibido  = min(tránsito, max(0, existencias_siesa − existencias_celes))
+        pendiente = tránsito − recibido
+    Sin ingreso nuevo, sin dato de Siesa o sin fecha de Celes, el tránsito queda completo.
+    Retorna (pendiente, recibido)."""
+    transito = pd.to_numeric(transito_celes, errors='coerce').fillna(0)
+    ingreso_nuevo = fecha_siesa.notna() & fecha_celes.notna() & (fecha_siesa > fecha_celes)
+    ganancia = (existencias_siesa - existencias_celes.fillna(0)).clip(lower=0)
+    recibido = np.minimum(ganancia, transito).where(ingreso_nuevo & existencias_siesa.notna(), 0.0)
+    recibido = recibido.round(6)
+    return (transito - recibido).clip(lower=0), recibido
+
+
+def resumen_inventario_tiendas(inv_t, alertas):
+    """Extracto de Siesa (Inventario Tiendas, una fila por ítem × bodega) → por (store_code, item_key):
+    `existencias_siesa` = suma de `Cant. disponible` de las sub-bodegas del C.O. (en cajas exactas, ver
+    `cajas_exactas`; ≥ 0; NaN si el archivo no trae la columna) y `fecha_ultimo_ingreso` = la más reciente.
+    Retorna (resumen, fecha_corte): la fecha de corte es el ingreso más reciente del archivo."""
+    inv_t = inv_t.copy()
+    inv_t['store_code'] = inv_t['C.O. bodega'].astype(str).str.strip()
+    inv_t['item_key'] = _normalize_item_series(inv_t['Item'])
+    inv_t['_fecha'] = pd.to_datetime(inv_t['Fecha última entrada'], errors='coerce')
+    _n_antes = len(inv_t)
+    inv_t = inv_t.dropna(subset=['item_key'])
+    _alertar_filas_descartadas(_n_antes, len(inv_t), 'Inventario Tiendas (Siesa)', alertas)
+    inv_t['item_key'] = inv_t['item_key'].astype(int)
+    if 'Cant. disponible' in inv_t.columns:
+        inv_t['_cant'] = pd.to_numeric(inv_t['Cant. disponible'], errors='coerce').fillna(0)
+        if 'Factor U.M.' in inv_t.columns:
+            inv_t['_cant'] = cajas_exactas(inv_t['_cant'], inv_t['Factor U.M.'])
+    else:
+        inv_t['_cant'] = np.nan
+    resumen = (
+        inv_t.groupby(['store_code', 'item_key'])
+        .agg(existencias_siesa=('_cant', lambda s: s.sum(min_count=1)), fecha_ultimo_ingreso=('_fecha', 'max'))
+        .reset_index()
+    )
+    negativos = resumen['existencias_siesa'] < 0
+    if negativos.any():
+        alertas.append({
+            'tipo': 'ADVERTENCIA', 'item': '-',
+            'mensaje': f'Inventario Tiendas (Siesa): {int(negativos.sum())} par(es) tienda-ítem con '
+                       '«Cant. disponible» negativa; se tomaron como 0 existencias.',
+            'pares_negativos': int(negativos.sum()),
+        })
+        resumen['existencias_siesa'] = resumen['existencias_siesa'].clip(lower=0)
+    return resumen, inv_t['_fecha'].max()
+
+
 def build_distribution_df(dfs):
     """Construye el DataFrame unificado: una fila por combinación tienda-ítem
     elegible, con las métricas del algoritmo.
@@ -232,9 +316,13 @@ def build_distribution_df(dfs):
         how='inner',
     )
 
-    # 6. MERGE 2: con Celes (consumo, días, existencias + tránsito). `indicator`
+    # 6. MERGE 2: con Celes (consumo, días, tránsito; sus existencias quedan solo de referencia). `indicator`
     # marca las combinaciones sin match (`sin_match_celes`): se rellenan con
     # consumo=0/inventario=0 y sin esa marca parecerían AGOTADAS.
+    for _opcional in ('Inventario Disponible en esta Tienda (Unidades de Distibución)', 'Última Fecha de Ingreso'):
+        if _opcional not in celes.columns:
+            celes[_opcional] = np.nan
+    celes['fecha_ingreso_celes'] = a_fecha_excel(celes['Última Fecha de Ingreso'])
     celes_cols = [
         'cod_siesa', 'item_key', 'Nombre de Bodega',
         'Consumo Diario (Unidades de Distribución)',
@@ -242,7 +330,7 @@ def build_distribution_df(dfs):
         'Inventario Disponible en esta Tienda (Unidades de Distibución)',
         '(-) inventario de traslado en proceso',
         '(=) Inventario Total',
-        'UM', 'vida_util',
+        'UM', 'vida_util', 'fecha_ingreso_celes',
     ]
     merged = merged.merge(
         celes[celes_cols],
@@ -276,7 +364,7 @@ def build_distribution_df(dfs):
         'cajas_disponibles': 'cajas_disponibles_cedi',
         'Consumo Diario (Unidades de Distribución)': 'consumo_diario',
         '(=) Días de Inventario Actuales': 'dias_inventario_actuales',
-        'Inventario Disponible en esta Tienda (Unidades de Distibución)': 'inventario_tienda',
+        'Inventario Disponible en esta Tienda (Unidades de Distibución)': 'inventario_tienda_celes',
         '(-) inventario de traslado en proceso': 'inventario_transito',
         '(=) Inventario Total': 'inventario_total',
     })
@@ -293,8 +381,46 @@ def build_distribution_df(dfs):
 
     # 8. Rellenar NaN y descartar negativos (no deben generar pesos/necesidades
     # negativas aguas abajo). Las magnitudes de Celes ya están en cajas.
-    for col in ['consumo_diario', 'dias_inventario_actuales', 'inventario_tienda', 'inventario_transito', 'inventario_total', 'vida_util']:
+    for col in ['consumo_diario', 'dias_inventario_actuales', 'inventario_tienda_celes', 'inventario_transito', 'inventario_total', 'vida_util']:
         merged[col] = pd.to_numeric(merged[col], errors='coerce').fillna(0).clip(lower=0)
+    merged['inventario_transito_celes'] = merged['inventario_transito']
+
+    # 8.b EXISTENCIAS DE LA TIENDA (27-nov-2026): `Cant. disponible` de Inventario Tiendas (Siesa),
+    # sumando sus sub-bodegas y en unidades exactas; el TRÁNSITO sale de Celes, menos lo que Siesa ya
+    # muestra recibido (`transito_pendiente`). Par sin fila en Siesa = 0 existencias (con alerta). Del
+    # mismo extracto sale la fecha de último ingreso (paso 12.b).
+    # Sin el archivo o sin la columna (solo pasa fuera de `loader`) se usan las de Celes, con alerta.
+    inv_t = dfs.get('inventario_tiendas')
+    if inv_t is not None:
+        resumen_inv, _fecha_corte = resumen_inventario_tiendas(inv_t, alertas)
+        merged = merged.merge(
+            resumen_inv, left_on=['store_code', 'item_code'],
+            right_on=['store_code', 'item_key'], how='left',
+        ).drop(columns=['item_key'])
+    else:
+        _fecha_corte = pd.NaT
+        merged['existencias_siesa'] = np.nan
+        merged['fecha_ultimo_ingreso'] = pd.NaT
+    _existencias_de_siesa = inv_t is not None and 'Cant. disponible' in inv_t.columns
+    if _existencias_de_siesa:
+        merged['_sin_fila_siesa'] = merged['existencias_siesa'].isna()
+        merged['inventario_tienda'] = merged['existencias_siesa'].fillna(0)
+        # Tránsito de Celes que Siesa ya muestra recibido: se descuenta para no contarlo dos veces.
+        merged['inventario_transito'], merged['transito_ya_recibido'] = transito_pendiente(
+            merged['existencias_siesa'], merged['inventario_tienda_celes'], merged['inventario_transito_celes'],
+            merged['fecha_ultimo_ingreso'], merged['fecha_ingreso_celes'],
+        )
+    else:
+        merged['_sin_fila_siesa'] = False
+        merged['inventario_tienda'] = merged['inventario_tienda_celes']
+        merged['transito_ya_recibido'] = 0.0
+        if inv_t is not None:
+            alertas.append({
+                'tipo': 'ADVERTENCIA', 'item': '-',
+                'mensaje': 'Inventario Tiendas (Siesa) no trae «Cant. disponible»: las existencias de las '
+                           'tiendas se tomaron de Celes.',
+            })
+    merged = merged.drop(columns=['existencias_siesa', 'fecha_ingreso_celes'])
 
     # 9. Inventario efectivo (existencias + tránsito) y días proyectados.
     # `inventario_total` queda como columna informativa.
@@ -447,29 +573,7 @@ def build_distribution_df(dfs):
             'celdas_no_numericas': _n_no_num,
         })
 
-    _fecha_corte = pd.NaT
-    inv_t = dfs.get('inventario_tiendas')
-    if inv_t is not None:
-        inv_t = inv_t.copy()
-        inv_t['store_code'] = inv_t['C.O. bodega'].astype(str).str.strip()
-        inv_t['item_key'] = _normalize_item_series(inv_t['Item'])
-        inv_t['_fecha'] = pd.to_datetime(inv_t['Fecha última entrada'], errors='coerce')
-        _n_antes = len(inv_t)
-        inv_t = inv_t.dropna(subset=['item_key'])
-        _alertar_filas_descartadas(_n_antes, len(inv_t), 'Inventario Tiendas (Siesa)', alertas)
-        inv_t['item_key'] = inv_t['item_key'].astype(int)
-        _fecha_corte = inv_t['_fecha'].max()
-        # Un ítem puede estar en varias sub-bodegas del mismo C.O.: vale el ingreso MÁS RECIENTE.
-        _ultima = (
-            inv_t.groupby(['store_code', 'item_key'])['_fecha'].max()
-            .rename('fecha_ultimo_ingreso').reset_index()
-        )
-        merged = merged.merge(
-            _ultima, left_on=['store_code', 'item_code'],
-            right_on=['store_code', 'item_key'], how='left',
-        ).drop(columns=['item_key'])
-    else:
-        merged['fecha_ultimo_ingreso'] = pd.NaT
+    # `fecha_ultimo_ingreso` ya viene del paso 8.b (varias sub-bodegas del C.O.: la MÁS RECIENTE).
     merged['fecha_ultimo_ingreso'] = pd.to_datetime(merged['fecha_ultimo_ingreso'])
     merged['fecha_corte_inventario'] = _fecha_corte
     merged['dias_desde_ingreso'] = (
@@ -523,6 +627,43 @@ def build_distribution_df(dfs):
             'cajas_sin_distribuir': cajas,
         })
 
+    # 13.b Alertas de existencias (paso 8.b), sobre las combinaciones que quedaron (tiendas activas,
+    # con pedido) y con datos en Celes, para que cuadren con la salida.
+    if _existencias_de_siesa:
+        _con_datos = ~merged['sin_match_celes']
+        _sin_fila = merged['_sin_fila_siesa'] & _con_datos
+        if _sin_fila.any():
+            alertas.append({
+                'tipo': 'ADVERTENCIA', 'item': '-',
+                'mensaje': f'{int(_sin_fila.sum())} combinación(es) tienda-ítem no aparecen en Inventario '
+                           'Tiendas (Siesa); se tomaron con 0 existencias.',
+                'combos_sin_inventario_siesa': int(_sin_fila.sum()),
+            })
+        _recibido = _con_datos & (merged['transito_ya_recibido'] > 0)
+        if _recibido.any():
+            _cajas_rec = float(merged.loc[_recibido, 'transito_ya_recibido'].sum())
+            alertas.append({
+                'tipo': 'ADVERTENCIA', 'item': '-',
+                'mensaje': f'{int(_recibido.sum())} combinación(es) tienda-ítem ya recibieron en Siesa el '
+                           f'tránsito que Celes aún mostraba en camino ({_cajas_rec:.2f} caja(s)); se '
+                           'descontó del tránsito para no contarlo dos veces.',
+                'combos_transito_recibido': int(_recibido.sum()),
+                'cajas_transito_recibido': round(_cajas_rec, 2),
+            })
+        # Diferencia que el tránsito recibido NO explica (ventas o ingresos entre las dos fotos).
+        _dif = (merged['inventario_tienda'] - merged['inventario_tienda_celes']
+                - merged['transito_ya_recibido']).abs()
+        _difieren = _con_datos & ~_sin_fila & (_dif > 0.5)
+        if _difieren.any():
+            alertas.append({
+                'tipo': 'ADVERTENCIA', 'item': '-',
+                'mensaje': f'{int(_difieren.sum())} combinación(es) tienda-ítem tienen existencias distintas '
+                           'en Inventario Tiendas (Siesa) y en Celes (más de 0,5 caja, sin contar el tránsito '
+                           'ya recibido): se movieron entre las dos fotos; se usó Siesa.',
+                'combos_existencias_distintas': int(_difieren.sum()),
+                'tiendas_afectadas': int(merged.loc[_difieren, 'store_code'].nunique()),
+            })
+
     # 14. Alerta agregada (una sola) de combinaciones excluidas por el tope MAX,
     # para que el efecto de BD_MAX sea auditable.
     n_bloqueadas = int(merged['bloqueado_por_max'].sum())
@@ -545,8 +686,9 @@ def build_distribution_df(dfs):
 
     cols_out = [
         'item_code', 'item_desc', 'portafolio', 'store_code', 'store_name', 'zona',
-        'consumo_diario', 'dias_inventario_actuales', 'inventario_tienda',
-        'inventario_transito', 'inventario_total', 'inventario_efectivo', 'dias_proyectados',
+        'consumo_diario', 'dias_inventario_actuales', 'inventario_tienda', 'inventario_tienda_celes',
+        'inventario_transito', 'inventario_transito_celes', 'transito_ya_recibido',
+        'inventario_total', 'inventario_efectivo', 'dias_proyectados',
         'cajas_disponibles_cedi', 'um', 'vida_util',
         'sin_match_celes', 'causa_sin_match',
         'max_existencias', 'bloqueado_por_max', 'excluida_del_reparto',

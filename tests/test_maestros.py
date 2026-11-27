@@ -141,7 +141,8 @@ def _diarios():
                 'Inventario Disponible en esta Tienda (Unidades de Distibución)': [1.0],
                 '(-) inventario de traslado en proceso': [0.0], '(=) Inventario Total': [1.0], 'UM': ['CN10']},
                hoja='Items')
-    inv = xl({'Item': [100], 'C.O. bodega': ['S01'], 'Fecha última entrada': ['2026-11-18']}, hoja='Inv Tiendas')
+    inv = xl({'Item': [100], 'C.O. bodega': ['S01'], 'Cant. disponible': [1.0],
+              'Fecha última entrada': ['2026-11-18']}, hoja='Inv Tiendas')
     return stock, celes, inv
 
 

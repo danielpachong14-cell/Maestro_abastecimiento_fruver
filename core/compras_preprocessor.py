@@ -13,7 +13,10 @@ from .preprocessor import (
     _alertar_filas_descartadas,
     _is_active,
     _normalize_item_series,
+    a_fecha_excel,
     normalize_store,
+    resumen_inventario_tiendas,
+    transito_pendiente,
 )
 
 _COL_CELES = {
@@ -24,6 +27,7 @@ _COL_CELES = {
     'Tiempo de Entrega desde Centro de Distribución (Días)': 'lt_celes',
     'Periodo de Revisión de Distribución (Días)': 'r_celes',
     'Nivel de Servicio': 'nivel_servicio',
+    'Última Fecha de Ingreso': 'fecha_ingreso_celes',
 }
 
 
@@ -380,30 +384,35 @@ def build_purchase_df(dfs, df_distribucion, plan, params, compras_transito=None)
     df = df.merge(pedido, on=['store_code', 'item_code'], how='left')
     df['pedido_hoy'] = _num(df['pedido_hoy'])
 
-    # Último ingreso (Inventario Tiendas) → días desde ingreso e «ingreso vencido» (informativo).
+    # Inventario Tiendas (Siesa): EXISTENCIAS de la tienda (`Cant. disponible`, suma de sub-bodegas; par
+    # sin fila = 0) y último ingreso → días desde ingreso e «ingreso vencido». El tránsito sigue de
+    # Celes. Sin la columna (solo fuera de `loader`) se usan las existencias de Celes. Las alertas de
+    # calidad del extracto ya las da la distribución: aquí se descartan para no duplicarlas.
     df['fecha_ultimo_ingreso'] = pd.NaT
+    df['existencias_tienda'] = df['existencias_celes']
     fecha_corte = pd.NaT
     inv_t = dfs.get('inventario_tiendas')
     if inv_t is not None:
-        inv_t = inv_t.copy()
-        inv_t['store_code'] = inv_t['C.O. bodega'].astype(str).str.strip()
-        inv_t['item_code'] = _normalize_item_series(inv_t['Item'])
-        inv_t = inv_t.dropna(subset=['item_code'])
-        inv_t['item_code'] = inv_t['item_code'].astype(int)
-        inv_t['_f'] = pd.to_datetime(inv_t['Fecha última entrada'], errors='coerce')
-        fecha_corte = inv_t['_f'].max()
-        ult = inv_t.groupby(['store_code', 'item_code'])['_f'].max().rename('_ult').reset_index()
-        df = df.merge(ult, on=['store_code', 'item_code'], how='left')
-        df['fecha_ultimo_ingreso'] = df['_ult']
-        df = df.drop(columns='_ult')
+        resumen, fecha_corte = resumen_inventario_tiendas(inv_t, [])
+        resumen = resumen.rename(columns={'item_key': 'item_code'})
+        df = df.drop(columns='fecha_ultimo_ingreso').merge(resumen, on=['store_code', 'item_code'], how='left')
+        if 'Cant. disponible' in inv_t.columns:
+            df['existencias_tienda'] = df['existencias_siesa'].fillna(0.0)
+            # Tránsito de Celes que Siesa ya muestra recibido: no se cuenta dos veces.
+            df['transito_celes'] = df['transito']
+            df['transito'], df['transito_ya_recibido'] = transito_pendiente(
+                df['existencias_siesa'], df['existencias_celes'], df['transito'],
+                pd.to_datetime(df['fecha_ultimo_ingreso']), a_fecha_excel(df['fecha_ingreso_celes']),
+            )
+        df = df.drop(columns='existencias_siesa')
     df['fecha_ultimo_ingreso'] = pd.to_datetime(df['fecha_ultimo_ingreso'])
     df['dias_desde_ingreso'] = (fecha_corte - df['fecha_ultimo_ingreso']).dt.days.astype(float)
     df['ingreso_vencido'] = (
         df['vida_util'].notna() & df['dias_desde_ingreso'].notna()
-        & (df['dias_desde_ingreso'] > df['vida_util']) & (df['existencias_celes'] > 0)
+        & (df['dias_desde_ingreso'] > df['vida_util']) & (df['existencias_tienda'] > 0)
     )
     df['existencias'] = np.where(df['ingreso_vencido'] & params.descontar_inventario_vencido,
-                                 0.0, df['existencias_celes'])
+                                 0.0, df['existencias_tienda'])
 
     # Demanda y objetivo a la llegada de la compra.
     df['crecimiento'] = df['item_code'].map(params.crecimiento_item).astype(float)

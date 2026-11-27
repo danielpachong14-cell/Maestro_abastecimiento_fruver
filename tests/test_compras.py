@@ -529,3 +529,32 @@ def test_el_pedido_de_hoy_llega_manana():
     res = comprar(filas, [item(100)], dist=distribucion([('S01', 100, 3)]))
     assert fila(res, 'S01', 100)['inv_proy_llegada'] == pytest.approx(1.0)    # 3 − vie − sáb
     assert compra_item(res, 100) == 1
+
+
+def test_existencias_de_la_compra_salen_de_inventario_tiendas_y_no_de_celes():
+    """Celes dice 0 existencias pero Siesa 3: inv = 3 + 1 (tránsito Celes) − 3 días = 1. Objetivo 2 → compra 1."""
+    filas = [tienda('S01', 100, 1.0, existencias=3, transito=1, min_ex=1)]
+    dfs = armar_dfs(filas, [item(100)])
+    dfs['celes']['Inventario Disponible en esta Tienda (Unidades de Distibución)'] = 0.0
+    from core.compras import ejecutar_compra
+    res = ejecutar_compra(dfs, distribucion([]), fecha=JUEVES, overrides={'usar_ss_celes': False})
+    f = fila(res, 'S01', 100)
+    assert f['existencias'] == pytest.approx(3.0)
+    assert f['transito'] == pytest.approx(1.0)
+    assert f['inv_proy_llegada'] == pytest.approx(1.0)
+    assert f['compra'] == 1
+
+
+def test_la_compra_no_cuenta_dos_veces_el_traslado_ya_recibido_en_siesa():
+    """Celes (último ingreso 18-nov): 0 + 2 en tránsito; Siesa (ingreso 19-nov): 2 → el traslado ya entró.
+    inv = 2 + 0 − 3 días = 0 (no 1). Objetivo 2 → compra 2."""
+    filas = [tienda('S01', 100, 1.0, existencias=2, transito=2, min_ex=1, ultimo_ingreso='2026-11-19')]
+    dfs = armar_dfs(filas, [item(100)])
+    dfs['celes']['Inventario Disponible en esta Tienda (Unidades de Distibución)'] = 0.0
+    dfs['celes']['Última Fecha de Ingreso'] = pd.Timestamp('2026-11-18')
+    from core.compras import ejecutar_compra
+    res = ejecutar_compra(dfs, distribucion([]), fecha=JUEVES, overrides={'usar_ss_celes': False})
+    f = fila(res, 'S01', 100)
+    assert (f['existencias'], f['transito'], f['transito_ya_recibido']) == pytest.approx((2.0, 0.0, 2.0))
+    assert f['inv_proy_llegada'] == pytest.approx(0.0)
+    assert f['compra'] == 2

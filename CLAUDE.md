@@ -39,8 +39,10 @@ escribe a disco. `loader.load_files` (archivos maestros sueltos) solo se conserv
 
 ## Distribución (`core/algorithm.py`)
 
-- `inventario_efectivo = existencias + tránsito` de Celes (no «(=) Inventario Total», que viene
-  inflado). `dias_proyectados = inventario_efectivo / consumo_diario`. Todo en **cajas enteras**.
+- `inventario_efectivo = existencias + tránsito`: existencias = `Cant. disponible` de Inventario Tiendas
+  (Siesa, suma de sub-bodegas, en unidades exactas; sin fila = 0), tránsito = «(-) inventario de traslado en
+  proceso» de Celes menos lo que Siesa ya recibió (`transito_pendiente`). No «(=) Inventario Total».
+  `dias_proyectados = inventario_efectivo / consumo_diario`. Lo que se reparte, en **cajas enteras**.
 - Prioridad por grupo espejo: AGOTADA (< `MIN_STOCK_AGOTADO` = 0.3 cajas) → SAFETY (< 0.7) →
   REPOSICIÓN (< `TARGET_DAYS` = 3 días) → CUBIERTA. La Fase 1 ordena solo por consumo (mayor
   primero); los niveles AGOTADA/SAFETY los usa la Fase 2.
@@ -111,6 +113,15 @@ sin coincidencia = DESCONTINUADO / MAX 0), así que funciona aunque Excel no hay
   atrasadas hasta 3 días. No cuentan las cerradas, las de otra bodega, los ítems inactivos ni las
   vencidas. «Recibida según Stock» = el Stock tiene `Fecha última entrada` posterior a la entrega,
   porque Siesa no cierra la línea al recibir.
+- **Existencias de tienda** (27-nov-2026): salen de `Cant. disponible` de Inventario Tiendas (Siesa), no de
+  Celes, en distribución y compra (mismo helper `resumen_inventario_tiendas`). Exactas: Siesa redondea a 2
+  decimales y se recupera la unidad entera, `round(cajas × Factor U.M.) / Factor U.M.` (factor ≤ 100;
+  2,92 × 36 → 105 → 2,916667). Las de Celes quedan de referencia (`inventario_tienda_celes`).
+- **Tránsito ya recibido** (27-nov-2026): Celes es una foto anterior a Siesa (26 contra 27-nov). Si Siesa tiene
+  un ingreso posterior a «Última Fecha de Ingreso» de Celes, se descuenta del tránsito lo que subieron las
+  existencias (tope: el tránsito); si no, el tránsito queda completo. Corrida del 27-nov: 295 dobles conteos
+  eliminados y 0 restantes; el efectivo coincide con el total de Celes en 2.876 de 2.927 pares (el resto
+  son ventas o ingresos entre las dos fotos, y vale Siesa). Alertas: tránsito recibido y diferencias > 0,5.
 - **Parámetros de distribución** (26-nov-2026): `TARGET_DAYS` = 3 días (antes 5) y `TOPE_EXCEDENTE` = 7
   días (antes 8).
 - «Resumen Ítems» muestra F1 a F5 (con `F5 Cero residuo`, sin %), así la fila suma «Total Cajas».
